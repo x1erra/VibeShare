@@ -21,12 +21,12 @@ type NostrClient struct {
 	sk   string
 	pk   string
 
-	mu        sync.Mutex
-	relays    map[string]*nostr.Relay          // url -> connected relay
-	rooms     map[string]func(*nostr.Event)    // roomID -> handler
-	subKeys   map[string]bool                  // "url|room" -> subscribed
-	seen      map[string]bool                  // event id dedupe
-	ctx       context.Context
+	mu      sync.Mutex
+	relays  map[string]*nostr.Relay       // url -> connected relay
+	rooms   map[string]func(*nostr.Event) // roomID -> handler
+	subKeys map[string]bool               // "url|room" -> subscribed
+	seen    map[string]bool               // event id dedupe
+	ctx     context.Context
 }
 
 func newNostrClient(urls []string) *NostrClient {

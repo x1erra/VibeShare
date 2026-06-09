@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // defaultNostrRelays are public Nostr relays used purely for signaling and
@@ -17,13 +18,13 @@ var defaultNostrRelays = []string{
 
 // Config is the router's persisted configuration (~/.vibeshare/config.json).
 type Config struct {
-	FrontPort        int      `json:"frontPort"`        // OpenAI-compatible endpoint clients point at
-	ControlPort      int      `json:"controlPort"`      // local control API for the Swift UI
-	UpstreamURL      string   `json:"upstreamUrl"`      // cli-proxy-api base URL
-	UpstreamAPIKey   string   `json:"upstreamApiKey"`   // optional bearer key for cli-proxy-api
-	NostrRelays      []string `json:"nostrRelays"`      // signaling relays
-	IdentityName     string   `json:"identityName"`     // human label others see ("Brandon's Mac")
-	EnableSharing    bool     `json:"enableSharing"`    // master switch for the P2P layer
+	FrontPort      int      `json:"frontPort"`      // OpenAI-compatible endpoint clients point at
+	ControlPort    int      `json:"controlPort"`    // local control API for the Swift UI
+	UpstreamURL    string   `json:"upstreamUrl"`    // cli-proxy-api base URL
+	UpstreamAPIKey string   `json:"upstreamApiKey"` // optional bearer key for cli-proxy-api
+	NostrRelays    []string `json:"nostrRelays"`    // signaling relays
+	IdentityName   string   `json:"identityName"`   // human label others see ("Brandon's Mac")
+	EnableSharing  bool     `json:"enableSharing"`  // master switch for the P2P layer
 }
 
 func defaultConfig() Config {
@@ -61,6 +62,15 @@ type Connection struct {
 	RedeemedAt int64  `json:"redeemedAt"`
 }
 
+// Usage is the persisted lifetime usage for one grant (host side) or connection
+// (guest side), keyed by that id in usage.json.
+type Usage struct {
+	Requests     int64 `json:"requests"`
+	InputTokens  int64 `json:"inputTokens"`
+	OutputTokens int64 `json:"outputTokens"`
+	LastUsed     int64 `json:"lastUsed"`
+}
+
 // Store owns all persisted state and guards it with a mutex.
 type Store struct {
 	mu          sync.RWMutex
@@ -68,6 +78,7 @@ type Store struct {
 	config      Config
 	grants      []Grant
 	connections []Connection
+	usage       map[string]Usage
 }
 
 func defaultStoreDir() string {
@@ -82,10 +93,11 @@ func openStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, config: defaultConfig()}
+	s := &Store{dir: dir, config: defaultConfig(), usage: map[string]Usage{}}
 	loadJSON(filepath.Join(dir, "config.json"), &s.config)
 	loadJSON(filepath.Join(dir, "grants.json"), &s.grants)
 	loadJSON(filepath.Join(dir, "connections.json"), &s.connections)
+	loadJSON(filepath.Join(dir, "usage.json"), &s.usage)
 	// Backfill any newly-added config fields that were absent on disk.
 	if s.config.FrontPort == 0 {
 		s.config.FrontPort = 8788
@@ -199,4 +211,32 @@ func (s *Store) RemoveConnection(id string) error {
 	conns := append([]Connection(nil), s.connections...)
 	s.mu.Unlock()
 	return saveJSON(filepath.Join(s.dir, "connections.json"), conns)
+}
+
+// Usage returns the persisted lifetime usage for an id (grant or connection).
+func (s *Store) Usage(id string) Usage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.usage[id]
+}
+
+// AddUsage accumulates one completed request's counters and persists them.
+// Request rate is human-paced, so writing the small usage.json each time is fine.
+func (s *Store) AddUsage(id string, reqs, inTok, outTok int64) {
+	s.mu.Lock()
+	if s.usage == nil {
+		s.usage = map[string]Usage{}
+	}
+	u := s.usage[id]
+	u.Requests += reqs
+	u.InputTokens += inTok
+	u.OutputTokens += outTok
+	u.LastUsed = time.Now().Unix()
+	s.usage[id] = u
+	snapshot := make(map[string]Usage, len(s.usage))
+	for k, v := range s.usage {
+		snapshot[k] = v
+	}
+	s.mu.Unlock()
+	_ = saveJSON(filepath.Join(s.dir, "usage.json"), snapshot)
 }

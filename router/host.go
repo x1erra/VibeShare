@@ -66,7 +66,6 @@ type hostGrant struct {
 	models        []string // advertised list (what guests see)
 	lastGuestSeen int64
 	activeReqs    int
-	totalReqs     int
 }
 
 type hostSession struct {
@@ -467,7 +466,6 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 
 	hg.mu.Lock()
 	hg.activeReqs++
-	hg.totalReqs++
 	hg.mu.Unlock()
 	h.notify()
 	defer func() {
@@ -487,6 +485,15 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	}
 	defer resp.Body.Close()
 
+	// The request reached the provider — count it and tally its tokens (parsed
+	// from the response as it streams past), persisted so it survives restarts.
+	tracker := newUsageTracker(resp.Header.Get("Content-Type"))
+	defer func() {
+		in, out := tracker.Finish()
+		h.store.AddUsage(hg.grant.ID, 1, in, out)
+		h.notify()
+	}()
+
 	_ = sendFrame(dc, frame{
 		T:      "head",
 		ID:     id,
@@ -498,6 +505,7 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			tracker.Write(buf[:n])
 			_ = sendFrame(dc, frame{
 				T:   "data",
 				ID:  id,
@@ -531,18 +539,28 @@ func (h *HostManager) grantAllowsModel(hg *hostGrant, model string) bool {
 
 // GrantStatus is the host-side runtime view of one grant, for the control API.
 type GrantStatus struct {
-	Online    bool     `json:"online"`
-	Routing   bool     `json:"routing"`
-	Models    []string `json:"models"`
-	TotalReqs int      `json:"totalReqs"`
+	Online       bool     `json:"online"`
+	Routing      bool     `json:"routing"`
+	Models       []string `json:"models"`
+	TotalReqs    int      `json:"totalReqs"`
+	InputTokens  int64    `json:"inputTokens"`
+	OutputTokens int64    `json:"outputTokens"`
 }
 
 func (h *HostManager) Status(grantID string) GrantStatus {
+	// Usage is persisted, so it is reported even for a stopped/revoked grant.
+	u := h.store.Usage(grantID)
+	st := GrantStatus{
+		TotalReqs:    int(u.Requests),
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+	}
+
 	h.mu.Lock()
 	hg, ok := h.grants[grantID]
 	h.mu.Unlock()
 	if !ok {
-		return GrantStatus{}
+		return st
 	}
 	hg.mu.Lock()
 	defer hg.mu.Unlock()
@@ -552,12 +570,10 @@ func (h *HostManager) Status(grantID string) GrantStatus {
 			online = true
 		}
 	}
-	return GrantStatus{
-		Online:    online,
-		Routing:   hg.activeReqs > 0,
-		Models:    append([]string(nil), hg.models...),
-		TotalReqs: hg.totalReqs,
-	}
+	st.Online = online
+	st.Routing = hg.activeReqs > 0
+	st.Models = append([]string(nil), hg.models...)
+	return st
 }
 
 func tagValue(ev *nostr.Event, name string) string {

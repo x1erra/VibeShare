@@ -220,7 +220,9 @@ struct GrantRow: View {
             HStack {
                 Text(grantScope).font(.caption2).foregroundStyle(.secondary)
                 Spacer()
-                Text("\(grant.totalReqs) reqs").font(.caption2).foregroundStyle(.secondary)
+                Text("\(grant.totalReqs) reqs · \(compact(grant.totalTokens)) tok")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .help("↑ \(grant.inputTokens) in · ↓ \(grant.outputTokens) out tokens")
                 Button(role: .destructive) {
                     Task { await controller.revokeGrant(grant.id) }
                 } label: { Text("Revoke").font(.caption2) }
@@ -303,7 +305,9 @@ struct ConnectionRow: View {
             HStack {
                 Text("\(connection.models.count) models").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
-                Text("\(connection.totalReqs) reqs").font(.caption2).foregroundStyle(.secondary)
+                Text("\(connection.totalReqs) reqs · \(compact(connection.totalTokens)) tok")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .help("↑ \(connection.inputTokens) in · ↓ \(connection.outputTokens) out tokens")
                 Button(role: .destructive) {
                     Task { await controller.removeConnection(connection.id) }
                 } label: { Text("Remove").font(.caption2) }
@@ -520,6 +524,16 @@ struct RedeemView: View {
 }
 
 // MARK: - Small components
+
+/// compact renders a count as 950, 12.3K, or 4.5M for tight UI labels.
+func compact(_ n: Int) -> String {
+    let v = Double(n)
+    switch n {
+    case ..<1_000: return "\(n)"
+    case ..<1_000_000: return String(format: "%.1fK", v / 1_000)
+    default: return String(format: "%.1fM", v / 1_000_000)
+    }
+}
 
 struct StatusDot: View {
     let on: Bool
