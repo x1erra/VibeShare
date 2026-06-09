@@ -1,0 +1,21 @@
+# Swift
+src/.build/
+src/*.xcodeproj
+*.swiftpm
+
+# Go
+router/vibeshare-router
+
+# Bundled binaries (downloaded/built — not committed)
+src/Sources/Resources/vibeshare-router
+src/Sources/Resources/cli-proxy-api-plus
+
+# App bundle
+VibeShare.app/
+*.zip
+
+# macOS
+.DS_Store
+
+# Local state (never commit — contains secret grant codes)
+.vibeshare/
