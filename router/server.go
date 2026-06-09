@@ -36,6 +36,9 @@ func (s *FrontServer) handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", s.handleCompletion)
 	mux.HandleFunc("POST /v1/completions", s.handleCompletion)
 	mux.HandleFunc("POST /v1/embeddings", s.handleCompletion)
+	// Anthropic Messages API — what Claude Code speaks. Same routing: the body
+	// carries a top-level `model`, so local-vs-friend routing works unchanged.
+	mux.HandleFunc("POST /v1/messages", s.handleCompletion)
 	// Anything else is forwarded to the local upstream unchanged.
 	mux.HandleFunc("/", s.handlePassthrough)
 	return withCORS(mux)

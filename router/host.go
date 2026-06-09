@@ -26,6 +26,7 @@ var allowedProxyPaths = map[string]bool{
 	"/v1/chat/completions": true,
 	"/v1/completions":      true,
 	"/v1/embeddings":       true,
+	"/v1/messages":         true, // Anthropic Messages API (Claude Code)
 }
 
 // providerModelHints maps a provider key to substrings that identify its models.
