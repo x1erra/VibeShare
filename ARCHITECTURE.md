@@ -95,7 +95,7 @@ DTLS-encrypted) carries the actual traffic. Frames are JSON text messages:
 | `end` / `err`      | host → guest | `{t, id, msg?}`                                   |
 
 The **host enforces** that `path` is allow-listed (`/v1/chat/completions`,
-`/v1/completions`, `/v1/models`, `/v1/embeddings`) and that the requested
+`/v1/completions`, `/v1/embeddings`, `/v1/messages`) and that the requested
 `model` is in the grant's shared set, then reverse-proxies to its local
 `cli-proxy-api` and streams the response bytes back. Streaming (`stream:true`,
 SSE) is transparent — bytes are just forwarded as `data` frames.
@@ -104,9 +104,10 @@ SSE) is transparent — bytes are just forwarded as `data` frames.
 
 * `GET /v1/models` → union of **local** models (from `cli-proxy-api`) and
   **remote** models advertised by online hosts. Local wins on collision.
-* `POST /v1/chat/completions` → if the model is available locally, forward to
-  `cli-proxy-api`; otherwise **auto-route** to an online host that advertises
-  it; otherwise `404`.
+* `POST /v1/chat/completions` (OpenAI) and `POST /v1/messages` (Anthropic /
+  Claude Code) → if the model is available locally, forward to `cli-proxy-api`;
+  otherwise **auto-route** to an online host that advertises it; otherwise `404`.
+  Both formats carry a top-level `model`, so the routing logic is shared.
 
 ## Control API (`control.go`) — Swift ⇆ router, `127.0.0.1:8799`
 

@@ -91,6 +91,23 @@ ad-hoc signed (fine locally; right-click → Open the first time).
 - **Borrow** tab → **Enter code** with the code they gave you. Their models now
   resolve through your local endpoint automatically.
 
+### Use with Claude Code
+
+Claude Code speaks the Anthropic Messages API (`/v1/messages`), which VibeShare
+routes the same way as the OpenAI path — local first, otherwise to an online
+friend who shares the model. Point Claude Code at the gateway:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8788 ANTHROPIC_API_KEY=vibeshare claude
+```
+
+`ANTHROPIC_API_KEY` only needs to be non-empty (the loopback endpoint doesn't
+check it). Tip: wrap it in a shell function so your normal `claude` is unchanged:
+
+```bash
+vibeclaude() { ANTHROPIC_BASE_URL=http://127.0.0.1:8788 ANTHROPIC_API_KEY=vibeshare claude "$@"; }
+```
+
 ## Ports & state
 
 | Port  | What                                                        |
