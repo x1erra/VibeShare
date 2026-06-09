@@ -176,6 +176,11 @@ func (s *FrontServer) forwardLocal(w http.ResponseWriter, r *http.Request, body 
 	}
 }
 
+// errBody builds an error envelope clients understand (OpenAI/Anthropic shape).
+func errBody(msg string) map[string]any {
+	return map[string]any{"error": map[string]any{"message": msg, "type": "vibeshare_error"}}
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

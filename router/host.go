@@ -76,6 +76,16 @@ type hostSession struct {
 	mu     sync.Mutex // guards dc + authed (written/read from pion callback goroutines)
 	dc     *webrtc.DataChannel
 	authed bool
+
+	// inbound accumulates chunked request bodies keyed by request id. Only
+	// touched from pion's single per-channel OnMessage goroutine, so no lock.
+	inbound map[string]*inboundReq
+}
+
+type inboundReq struct {
+	method string
+	path   string
+	body   []byte
 }
 
 func (hs *hostSession) setChannel(dc *webrtc.DataChannel) {
@@ -301,7 +311,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 		hg.mu.Unlock()
 		return
 	}
-	hs := &hostSession{id: session, pc: pc}
+	hs := &hostSession{id: session, pc: pc, inbound: map[string]*inboundReq{}}
 	hg.sessions[session] = hs
 	hg.mu.Unlock()
 
@@ -411,18 +421,32 @@ func (h *HostManager) onFrame(hg *hostGrant, hs *hostSession, data []byte) {
 			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "not authenticated"})
 			return
 		}
-		go h.proxyRequest(hg, hs, f)
+		if hs.inbound == nil {
+			hs.inbound = map[string]*inboundReq{}
+		}
+		hs.inbound[f.ID] = &inboundReq{method: f.Method, path: f.Path}
+	case "reqdata":
+		if ir := hs.inbound[f.ID]; ir != nil {
+			chunk, err := base64.StdEncoding.DecodeString(f.B64)
+			if err == nil {
+				ir.body = append(ir.body, chunk...)
+			}
+		}
+	case "reqend":
+		if ir := hs.inbound[f.ID]; ir != nil {
+			delete(hs.inbound, f.ID)
+			go h.proxyRequest(hg, hs, f.ID, ir.method, ir.path, ir.body)
+		}
 	}
 }
 
-func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, f frame) {
+func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, path string, body []byte) {
 	dc := hs.channel()
 	if dc == nil {
 		return
 	}
-	path := f.Path
 	if !allowedProxyPaths[path] {
-		_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "path not allowed"})
+		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "path not allowed"})
 		return
 	}
 
@@ -431,13 +455,12 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, f frame) {
 	var probe struct {
 		Model string `json:"model"`
 	}
-	_ = json.Unmarshal([]byte(f.Body), &probe)
+	_ = json.Unmarshal(body, &probe)
 	if !h.grantAllowsModel(hg, probe.Model) {
-		_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "model not shared: " + probe.Model})
+		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "model not shared: " + probe.Model})
 		return
 	}
 
-	method := f.Method
 	if method == "" {
 		method = http.MethodPost
 	}
@@ -457,16 +480,16 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, f frame) {
 	ctx, cancel := context.WithCancel(h.ctx)
 	defer cancel()
 
-	resp, err := h.upstream.do(ctx, method, path, []byte(f.Body))
+	resp, err := h.upstream.do(ctx, method, path, body)
 	if err != nil {
-		_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "upstream error: " + err.Error()})
+		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "upstream error: " + err.Error()})
 		return
 	}
 	defer resp.Body.Close()
 
 	_ = sendFrame(dc, frame{
 		T:      "head",
-		ID:     f.ID,
+		ID:     id,
 		Status: resp.StatusCode,
 		Ctype:  resp.Header.Get("Content-Type"),
 	})
@@ -477,19 +500,19 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, f frame) {
 		if n > 0 {
 			_ = sendFrame(dc, frame{
 				T:   "data",
-				ID:  f.ID,
+				ID:  id,
 				B64: base64.StdEncoding.EncodeToString(buf[:n]),
 			})
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
-				_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: readErr.Error()})
+				_ = sendFrame(dc, frame{T: "err", ID: id, Msg: readErr.Error()})
 				return
 			}
 			break
 		}
 	}
-	_ = sendFrame(dc, frame{T: "end", ID: f.ID})
+	_ = sendFrame(dc, frame{T: "end", ID: id})
 }
 
 func (h *HostManager) grantAllowsModel(hg *hostGrant, model string) bool {

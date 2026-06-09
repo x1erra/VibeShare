@@ -263,11 +263,13 @@ func (g *GuestManager) CanRoute(model string) bool {
 func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path string, body []byte, w http.ResponseWriter) error {
 	gc := g.findHostForModel(model)
 	if gc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("no online friend shares model "+model))
 		return errors.New("no online friend shares model " + model)
 	}
 
 	s, err := g.ensureSession(ctx, gc)
 	if err != nil {
+		writeJSON(w, http.StatusBadGateway, errBody("could not connect to friend: "+err.Error()))
 		return err
 	}
 
@@ -295,7 +297,8 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 		g.notify()
 	}()
 
-	if err := sendFrame(s.dc, frame{T: "req", ID: id, Method: method, Path: path, Body: string(body)}); err != nil {
+	if err := g.sendRequest(s, id, method, path, body); err != nil {
+		writeJSON(w, http.StatusBadGateway, errBody("failed to send request to friend: "+err.Error()))
 		return err
 	}
 
@@ -310,14 +313,14 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 			return ctx.Err()
 		case <-s.closed:
 			if !wroteHead {
-				return errors.New("connection closed")
+				writeJSON(w, http.StatusBadGateway, errBody("connection to friend closed before a response"))
 			}
-			return nil
+			return errors.New("connection closed")
 		case <-idle.C:
 			if !wroteHead {
-				return errors.New("timed out waiting for friend's response")
+				writeJSON(w, http.StatusGatewayTimeout, errBody("friend did not respond in time"))
 			}
-			return nil
+			return errors.New("idle timeout")
 		case ev := <-pr.ch:
 			if !idle.Stop() {
 				select {
@@ -358,6 +361,26 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 			}
 		}
 	}
+}
+
+// sendRequest streams the request to the host as a `req` frame followed by
+// base64 body chunks (so arbitrarily large bodies — Claude Code's system prompt
+// + tools easily exceed the data channel's per-message limit) and a `reqend`.
+func (g *GuestManager) sendRequest(s *guestSession, id, method, path string, body []byte) error {
+	if err := sendFrame(s.dc, frame{T: "req", ID: id, Method: method, Path: path}); err != nil {
+		return err
+	}
+	const chunk = 16 * 1024
+	for off := 0; off < len(body); off += chunk {
+		end := off + chunk
+		if end > len(body) {
+			end = len(body)
+		}
+		if err := sendFrame(s.dc, frame{T: "reqdata", ID: id, B64: base64.StdEncoding.EncodeToString(body[off:end])}); err != nil {
+			return err
+		}
+	}
+	return sendFrame(s.dc, frame{T: "reqend", ID: id})
 }
 
 func (g *GuestManager) ensureSession(ctx context.Context, gc *guestConn) (*guestSession, error) {
