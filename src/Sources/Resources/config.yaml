@@ -1,0 +1,21 @@
+# VibeShare's bundled configuration for cli-proxy-api (the provider engine).
+# It is bound to loopback only; the VibeShare router is the single front door.
+
+# Bind to localhost only — never expose the provider engine directly.
+host: "127.0.0.1"
+port: 8317
+
+# Where OAuth credentials / API keys are stored (one folder, like VibeProxy).
+auth-dir: "~/.cli-proxy-api"
+
+# No API keys required: only the local VibeShare router talks to this port.
+api-keys: []
+
+# Management API stays local + keyless-disabled for safety.
+remote-management:
+  allow-remote: false
+  secret-key: ""
+
+debug: false
+logging-to-file: false
+usage-statistics-enabled: false
