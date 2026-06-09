@@ -186,6 +186,7 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 		}
 		switch sc.Kind {
 		case "answer":
+			log.Printf("guest[%s]: answer received", s.id)
 			var answer webrtc.SessionDescription
 			if json.Unmarshal(sc.Payload, &answer) == nil {
 				_ = s.pc.SetRemoteDescription(answer)
@@ -255,6 +256,26 @@ func (g *GuestManager) findHostForModel(model string) *guestConn {
 // CanRoute reports whether some online host advertises the model.
 func (g *GuestManager) CanRoute(model string) bool {
 	return g.findHostForModel(model) != nil
+}
+
+// OnlineFriends reports how many friend connections are online, and how many of
+// those are advertising at least one model — used for clearer routing errors.
+func (g *GuestManager) OnlineFriends() (online, sharing int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, gc := range g.conns {
+		gc.mu.Lock()
+		isOnline := time.Now().Unix()-gc.lastSeen < 60
+		hasModels := len(gc.hostModels) > 0
+		gc.mu.Unlock()
+		if isOnline {
+			online++
+			if hasModels {
+				sharing++
+			}
+		}
+	}
+	return
 }
 
 // RouteRequest proxies an OpenAI request to an online host over WebRTC, streaming
@@ -455,7 +476,11 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 		cand, _ := json.Marshal(c.ToJSON())
 		g.sendSignal(gc, s.id, "ice", cand)
 	})
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("guest[%s]: ICE state -> %s", s.id, state)
+	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("guest[%s]: conn state -> %s", s.id, state)
 		if state == webrtc.PeerConnectionStateFailed ||
 			state == webrtc.PeerConnectionStateClosed ||
 			state == webrtc.PeerConnectionStateDisconnected {
@@ -463,6 +488,7 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 		}
 	})
 	dc.OnOpen(func() {
+		log.Printf("guest[%s]: data channel open, sending auth", s.id)
 		payload, err := sealJSON(s.keys.channelKey, authPayload{TS: time.Now().Unix()})
 		if err == nil {
 			_ = sendFrame(dc, frame{T: "auth", Payload: payload})
@@ -483,6 +509,7 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 	}
 	offJSON, _ := json.Marshal(offer)
 	g.sendSignal(gc, s.id, "offer", offJSON)
+	log.Printf("guest[%s]: offer sent to room", s.id)
 	return s, nil
 }
 

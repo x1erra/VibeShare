@@ -66,6 +66,7 @@ type hostGrant struct {
 	models        []string // advertised list (what guests see)
 	lastGuestSeen int64
 	activeReqs    int
+	warnedEmpty   bool // tracks the 0-models warning so we log only on transitions
 }
 
 type hostSession struct {
@@ -176,7 +177,21 @@ func (h *HostManager) recomputeModels(hg *hostGrant) {
 	hg.allowAll = allowAll
 	hg.models = models
 	hg.allowedModels = models
+	empty := len(models) == 0
+	transition := empty != hg.warnedEmpty
+	hg.warnedEmpty = empty
+	label := hg.grant.Label
 	hg.mu.Unlock()
+
+	// Surface the most common "nothing routes" cause: the provider engine isn't
+	// serving any models (cli-proxy-api down, or no provider connected).
+	if transition {
+		if empty {
+			log.Printf("host: grant %q is sharing 0 models — connect a provider / check cli-proxy-api is running", label)
+		} else {
+			log.Printf("host: grant %q now sharing %d models", label, len(models))
+		}
+	}
 }
 
 func computeSharedModels(g Grant, upstream []modelObject) (models []string, allowAll bool) {
@@ -313,6 +328,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	hs := &hostSession{id: session, pc: pc, inbound: map[string]*inboundReq{}}
 	hg.sessions[session] = hs
 	hg.mu.Unlock()
+	log.Printf("host[%s]: offer received", session)
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
@@ -322,7 +338,11 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 		h.sendSignal(hg, session, "ice", cand)
 	})
 
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("host[%s]: ICE state -> %s", session, state)
+	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		log.Printf("host[%s]: conn state -> %s", session, s)
 		if s == webrtc.PeerConnectionStateFailed ||
 			s == webrtc.PeerConnectionStateClosed ||
 			s == webrtc.PeerConnectionStateDisconnected {
@@ -331,6 +351,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	})
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		log.Printf("host[%s]: data channel established", session)
 		hs.setChannel(dc)
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			h.onFrame(hg, hs, msg.Data)
@@ -353,6 +374,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	}
 	ansJSON, _ := json.Marshal(answer)
 	h.sendSignal(hg, session, "answer", ansJSON)
+	log.Printf("host[%s]: answer sent", session)
 }
 
 func (h *HostManager) handleICE(hg *hostGrant, sc signalContent) {
