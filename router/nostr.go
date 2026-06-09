@@ -21,12 +21,12 @@ type NostrClient struct {
 	sk   string
 	pk   string
 
-	mu        sync.Mutex
-	relays    map[string]*nostr.Relay          // url -> connected relay
-	rooms     map[string]func(*nostr.Event)    // roomID -> handler
-	subKeys   map[string]bool                  // "url|room" -> subscribed
-	seen      map[string]bool                  // event id dedupe
-	ctx       context.Context
+	mu      sync.Mutex
+	relays  map[string]*nostr.Relay       // url -> connected relay
+	rooms   map[string]func(*nostr.Event) // roomID -> handler
+	subKeys map[string]bool               // "url|room" -> subscribed
+	seen    map[string]bool               // event id dedupe
+	ctx     context.Context
 }
 
 func newNostrClient(urls []string) *NostrClient {
@@ -114,7 +114,9 @@ func (n *NostrClient) Publish(roomID, tType, content string) {
 		go func(r *nostr.Relay) {
 			ctx, cancel := context.WithTimeout(n.ctx, 8*time.Second)
 			defer cancel()
-			_ = r.Publish(ctx, ev)
+			if err := r.Publish(ctx, ev); err != nil {
+				log.Printf("nostr: publish t=%s to %s FAILED: %v", tType, r.URL, err)
+			}
 		}(r)
 	}
 }

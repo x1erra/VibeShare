@@ -41,6 +41,10 @@ struct GrantView: Codable, Identifiable {
     var routing: Bool
     var advertisedModels: [String]
     var totalReqs: Int
+    var inputTokens: Int
+    var outputTokens: Int
+
+    var totalTokens: Int { inputTokens + outputTokens }
 
     // Tolerant decoding: a null or missing field defaults instead of throwing,
     // so create vs. list response shapes can never crash the UI.
@@ -57,6 +61,8 @@ struct GrantView: Codable, Identifiable {
         routing = try c.decodeIfPresent(Bool.self, forKey: .routing) ?? false
         advertisedModels = try c.decodeIfPresent([String].self, forKey: .advertisedModels) ?? []
         totalReqs = try c.decodeIfPresent(Int.self, forKey: .totalReqs) ?? 0
+        inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
+        outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
     }
 }
 
@@ -69,6 +75,10 @@ struct ConnectionView: Codable, Identifiable {
     var hostName: String
     var models: [String]
     var totalReqs: Int
+    var inputTokens: Int
+    var outputTokens: Int
+
+    var totalTokens: Int { inputTokens + outputTokens }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -80,6 +90,8 @@ struct ConnectionView: Codable, Identifiable {
         hostName = try c.decodeIfPresent(String.self, forKey: .hostName) ?? ""
         models = try c.decodeIfPresent([String].self, forKey: .models) ?? []
         totalReqs = try c.decodeIfPresent(Int.self, forKey: .totalReqs) ?? 0
+        inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
+        outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
     }
 }
 

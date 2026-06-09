@@ -123,11 +123,16 @@ func (s *FrontServer) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		s.forwardLocal(w, r, body)
 		return
 	}
+	online, sharing := s.guest.OnlineFriends()
+	msg := "model '" + probe.Model + "' is not available locally and no online friend shares it"
+	if online > 0 && sharing == 0 {
+		msg = "model '" + probe.Model + "': " + strconv.Itoa(online) +
+			" friend(s) online but sharing 0 models — their provider engine (cli-proxy-api) may be off or have no provider connected"
+	} else if online > 0 {
+		msg = "model '" + probe.Model + "' is not shared by any online friend (it may not be in what they shared)"
+	}
 	writeJSON(w, http.StatusNotFound, map[string]any{
-		"error": map[string]any{
-			"message": "model '" + probe.Model + "' is not available locally and no online friend shares it",
-			"type":    "model_not_found",
-		},
+		"error": map[string]any{"message": msg, "type": "model_not_found"},
 	})
 }
 

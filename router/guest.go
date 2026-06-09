@@ -36,15 +36,14 @@ type guestConn struct {
 	hostModels []string
 	lastSeen   int64
 	active     int
-	totalReqs  int
 	session    *guestSession
 }
 
 type guestSession struct {
-	id      string
-	pc      *webrtc.PeerConnection
-	dc      *webrtc.DataChannel
-	keys    grantKeys
+	id       string
+	pc       *webrtc.PeerConnection
+	dc       *webrtc.DataChannel
+	keys     grantKeys
 	authOK   chan struct{}
 	authErr  string
 	authOnce sync.Once
@@ -187,6 +186,7 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 		}
 		switch sc.Kind {
 		case "answer":
+			log.Printf("guest[%s]: answer received", s.id)
 			var answer webrtc.SessionDescription
 			if json.Unmarshal(sc.Payload, &answer) == nil {
 				_ = s.pc.SetRemoteDescription(answer)
@@ -258,6 +258,26 @@ func (g *GuestManager) CanRoute(model string) bool {
 	return g.findHostForModel(model) != nil
 }
 
+// OnlineFriends reports how many friend connections are online, and how many of
+// those are advertising at least one model — used for clearer routing errors.
+func (g *GuestManager) OnlineFriends() (online, sharing int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, gc := range g.conns {
+		gc.mu.Lock()
+		isOnline := time.Now().Unix()-gc.lastSeen < 60
+		hasModels := len(gc.hostModels) > 0
+		gc.mu.Unlock()
+		if isOnline {
+			online++
+			if hasModels {
+				sharing++
+			}
+		}
+	}
+	return
+}
+
 // RouteRequest proxies an OpenAI request to an online host over WebRTC, streaming
 // the response into w. Returns an error if no host can serve it / setup failed.
 func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path string, body []byte, w http.ResponseWriter) error {
@@ -287,7 +307,6 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 
 	gc.mu.Lock()
 	gc.active++
-	gc.totalReqs++
 	gc.mu.Unlock()
 	g.notify()
 	defer func() {
@@ -301,6 +320,17 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 		writeJSON(w, http.StatusBadGateway, errBody("failed to send request to friend: "+err.Error()))
 		return err
 	}
+
+	// Mirror the host's usage tally on the borrower's side (persisted). Only
+	// counted once a response actually starts, so failed routes don't inflate it.
+	var tracker *usageTracker
+	defer func() {
+		if tracker != nil {
+			in, out := tracker.Finish()
+			g.store.AddUsage(gc.conn.ID, 1, in, out)
+			g.notify()
+		}
+	}()
 
 	flusher, _ := w.(http.Flusher)
 	wroteHead := false
@@ -334,6 +364,7 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 				if ev.ctype != "" {
 					w.Header().Set("Content-Type", ev.ctype)
 				}
+				tracker = newUsageTracker(ev.ctype)
 				status := ev.status
 				if status == 0 {
 					status = http.StatusOK
@@ -344,6 +375,9 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 				if !wroteHead {
 					w.WriteHeader(http.StatusOK)
 					wroteHead = true
+				}
+				if tracker != nil {
+					tracker.Write(ev.data)
 				}
 				if _, err := w.Write(ev.data); err != nil {
 					return err
@@ -442,7 +476,11 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 		cand, _ := json.Marshal(c.ToJSON())
 		g.sendSignal(gc, s.id, "ice", cand)
 	})
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("guest[%s]: ICE state -> %s", s.id, state)
+	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("guest[%s]: conn state -> %s", s.id, state)
 		if state == webrtc.PeerConnectionStateFailed ||
 			state == webrtc.PeerConnectionStateClosed ||
 			state == webrtc.PeerConnectionStateDisconnected {
@@ -450,6 +488,7 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 		}
 	})
 	dc.OnOpen(func() {
+		log.Printf("guest[%s]: data channel open, sending auth", s.id)
 		payload, err := sealJSON(s.keys.channelKey, authPayload{TS: time.Now().Unix()})
 		if err == nil {
 			_ = sendFrame(dc, frame{T: "auth", Payload: payload})
@@ -470,6 +509,7 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 	}
 	offJSON, _ := json.Marshal(offer)
 	g.sendSignal(gc, s.id, "offer", offJSON)
+	log.Printf("guest[%s]: offer sent to room", s.id)
 	return s, nil
 }
 
@@ -546,27 +586,34 @@ func (s *guestSession) isClosed() bool {
 
 // ConnStatus is the guest-side runtime view of one connection.
 type ConnStatus struct {
-	Online    bool     `json:"online"`
-	Routing   bool     `json:"routing"`
-	HostName  string   `json:"hostName"`
-	Models    []string `json:"models"`
-	TotalReqs int      `json:"totalReqs"`
+	Online       bool     `json:"online"`
+	Routing      bool     `json:"routing"`
+	HostName     string   `json:"hostName"`
+	Models       []string `json:"models"`
+	TotalReqs    int      `json:"totalReqs"`
+	InputTokens  int64    `json:"inputTokens"`
+	OutputTokens int64    `json:"outputTokens"`
 }
 
 func (g *GuestManager) Status(connID string) ConnStatus {
+	u := g.store.Usage(connID)
+	st := ConnStatus{
+		TotalReqs:    int(u.Requests),
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+	}
+
 	g.mu.Lock()
 	gc, ok := g.conns[connID]
 	g.mu.Unlock()
 	if !ok {
-		return ConnStatus{}
+		return st
 	}
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
-	return ConnStatus{
-		Online:    time.Now().Unix()-gc.lastSeen < 60,
-		Routing:   gc.active > 0,
-		HostName:  gc.hostName,
-		Models:    append([]string(nil), gc.hostModels...),
-		TotalReqs: gc.totalReqs,
-	}
+	st.Online = time.Now().Unix()-gc.lastSeen < 60
+	st.Routing = gc.active > 0
+	st.HostName = gc.hostName
+	st.Models = append([]string(nil), gc.hostModels...)
+	return st
 }

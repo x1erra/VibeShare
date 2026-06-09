@@ -8,14 +8,12 @@ OpenAI-compatible endpoint (`http://127.0.0.1:8788/v1`) that:
 1. **Runs a local OpenAI-spec server** your tools can point at.
 2. **Connects your LLM providers** (Claude, ChatGPT/Codex, Gemini, Kimi, …) via
    one-click OAuth — powered by the bundled
-   [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), exactly like
-   [VibeProxy](https://github.com/automazeio/vibeproxy).
+   [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 3. **Shares usage with friends** by generating a code they paste in. Sharing is
    one-directional: your code lets them use *your* models; you only get theirs
    if they send you a code.
 4. **Shows who's online** and actively routing — discovered over public Nostr
-   relays, connected directly over WebRTC (P2P), like
-   [SeedShell](https://github.com/Deploydon/seedshell).
+   relays, connected directly over WebRTC (P2P).
 
 When a friend requests a model you don't have, VibeShare auto-routes it to an
 online friend who shares it, streaming the response back over a direct,
@@ -141,11 +139,31 @@ verified end-to-end). Rough edges / planned next steps:
 
 ## Credits
 
-Built on the shoulders of
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI),
-[VibeProxy](https://github.com/automazeio/vibeproxy), and
-[SeedShell](https://github.com/Deploydon/seedshell).
+Provider authentication and the OpenAI-compatible provider API are handled by
+the bundled [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+
+VibeShare was inspired initially by
+[VibeProxy](https://github.com/automazeio/vibeproxy), and its peer-to-peer
+signaling draws on ideas from
+[SeedShell](https://github.com/Deploydon/seedshell). The code here is its own.
+
+## Disclaimer
+
+VibeShare lets you share access to your LLM provider accounts with other people.
+**Doing so may violate the terms of service** of the providers involved (such as
+Anthropic, OpenAI, Google, and others) — many subscriptions prohibit sharing
+accounts, credentials, or access with third parties.
+
+**You alone are responsible** for ensuring your use of VibeShare complies with
+the terms of every provider and account you connect or share. The authors and
+contributors **take no responsibility and accept no liability** for any
+consequences of using it — including but not limited to account suspension,
+termination, lockout, rate-limiting, loss of access, or any other action a
+provider may take against you or anyone you share with.
+
+VibeShare is provided "as is", without warranty of any kind. **Use it at your
+own risk.**
 
 ## License
 
-MIT
+MIT 

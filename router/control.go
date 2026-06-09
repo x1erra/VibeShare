@@ -108,6 +108,8 @@ type grantView struct {
 	Routing          bool     `json:"routing"`
 	AdvertisedModels []string `json:"advertisedModels"`
 	TotalReqs        int      `json:"totalReqs"`
+	InputTokens      int64    `json:"inputTokens"`
+	OutputTokens     int64    `json:"outputTokens"`
 }
 
 func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +128,8 @@ func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
 			Routing:          st.Routing,
 			AdvertisedModels: nonNil(st.Models),
 			TotalReqs:        st.TotalReqs,
+			InputTokens:      st.InputTokens,
+			OutputTokens:     st.OutputTokens,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -187,14 +191,16 @@ func (c *ControlServer) deleteGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 type connectionView struct {
-	ID         string   `json:"id"`
-	Label      string   `json:"label"`
-	RedeemedAt int64    `json:"redeemedAt"`
-	Online     bool     `json:"online"`
-	Routing    bool     `json:"routing"`
-	HostName   string   `json:"hostName"`
-	Models     []string `json:"models"`
-	TotalReqs  int      `json:"totalReqs"`
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	RedeemedAt   int64    `json:"redeemedAt"`
+	Online       bool     `json:"online"`
+	Routing      bool     `json:"routing"`
+	HostName     string   `json:"hostName"`
+	Models       []string `json:"models"`
+	TotalReqs    int      `json:"totalReqs"`
+	InputTokens  int64    `json:"inputTokens"`
+	OutputTokens int64    `json:"outputTokens"`
 }
 
 func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) {
@@ -202,14 +208,16 @@ func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) 
 	for _, conn := range c.store.Connections() {
 		st := c.guest.Status(conn.ID)
 		out = append(out, connectionView{
-			ID:         conn.ID,
-			Label:      conn.Label,
-			RedeemedAt: conn.RedeemedAt,
-			Online:     st.Online,
-			Routing:    st.Routing,
-			HostName:   st.HostName,
-			Models:     nonNil(st.Models),
-			TotalReqs:  st.TotalReqs,
+			ID:           conn.ID,
+			Label:        conn.Label,
+			RedeemedAt:   conn.RedeemedAt,
+			Online:       st.Online,
+			Routing:      st.Routing,
+			HostName:     st.HostName,
+			Models:       nonNil(st.Models),
+			TotalReqs:    st.TotalReqs,
+			InputTokens:  st.InputTokens,
+			OutputTokens: st.OutputTokens,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

@@ -66,7 +66,7 @@ type hostGrant struct {
 	models        []string // advertised list (what guests see)
 	lastGuestSeen int64
 	activeReqs    int
-	totalReqs     int
+	warnedEmpty   bool // tracks the 0-models warning so we log only on transitions
 }
 
 type hostSession struct {
@@ -177,7 +177,21 @@ func (h *HostManager) recomputeModels(hg *hostGrant) {
 	hg.allowAll = allowAll
 	hg.models = models
 	hg.allowedModels = models
+	empty := len(models) == 0
+	transition := empty != hg.warnedEmpty
+	hg.warnedEmpty = empty
+	label := hg.grant.Label
 	hg.mu.Unlock()
+
+	// Surface the most common "nothing routes" cause: the provider engine isn't
+	// serving any models (cli-proxy-api down, or no provider connected).
+	if transition {
+		if empty {
+			log.Printf("host: grant %q is sharing 0 models — connect a provider / check cli-proxy-api is running", label)
+		} else {
+			log.Printf("host: grant %q now sharing %d models", label, len(models))
+		}
+	}
 }
 
 func computeSharedModels(g Grant, upstream []modelObject) (models []string, allowAll bool) {
@@ -314,6 +328,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	hs := &hostSession{id: session, pc: pc, inbound: map[string]*inboundReq{}}
 	hg.sessions[session] = hs
 	hg.mu.Unlock()
+	log.Printf("host[%s]: offer received", session)
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
@@ -323,7 +338,11 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 		h.sendSignal(hg, session, "ice", cand)
 	})
 
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("host[%s]: ICE state -> %s", session, state)
+	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		log.Printf("host[%s]: conn state -> %s", session, s)
 		if s == webrtc.PeerConnectionStateFailed ||
 			s == webrtc.PeerConnectionStateClosed ||
 			s == webrtc.PeerConnectionStateDisconnected {
@@ -332,6 +351,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	})
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		log.Printf("host[%s]: data channel established", session)
 		hs.setChannel(dc)
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			h.onFrame(hg, hs, msg.Data)
@@ -354,6 +374,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	}
 	ansJSON, _ := json.Marshal(answer)
 	h.sendSignal(hg, session, "answer", ansJSON)
+	log.Printf("host[%s]: answer sent", session)
 }
 
 func (h *HostManager) handleICE(hg *hostGrant, sc signalContent) {
@@ -467,7 +488,6 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 
 	hg.mu.Lock()
 	hg.activeReqs++
-	hg.totalReqs++
 	hg.mu.Unlock()
 	h.notify()
 	defer func() {
@@ -487,6 +507,15 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	}
 	defer resp.Body.Close()
 
+	// The request reached the provider — count it and tally its tokens (parsed
+	// from the response as it streams past), persisted so it survives restarts.
+	tracker := newUsageTracker(resp.Header.Get("Content-Type"))
+	defer func() {
+		in, out := tracker.Finish()
+		h.store.AddUsage(hg.grant.ID, 1, in, out)
+		h.notify()
+	}()
+
 	_ = sendFrame(dc, frame{
 		T:      "head",
 		ID:     id,
@@ -498,6 +527,7 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			tracker.Write(buf[:n])
 			_ = sendFrame(dc, frame{
 				T:   "data",
 				ID:  id,
@@ -531,18 +561,28 @@ func (h *HostManager) grantAllowsModel(hg *hostGrant, model string) bool {
 
 // GrantStatus is the host-side runtime view of one grant, for the control API.
 type GrantStatus struct {
-	Online    bool     `json:"online"`
-	Routing   bool     `json:"routing"`
-	Models    []string `json:"models"`
-	TotalReqs int      `json:"totalReqs"`
+	Online       bool     `json:"online"`
+	Routing      bool     `json:"routing"`
+	Models       []string `json:"models"`
+	TotalReqs    int      `json:"totalReqs"`
+	InputTokens  int64    `json:"inputTokens"`
+	OutputTokens int64    `json:"outputTokens"`
 }
 
 func (h *HostManager) Status(grantID string) GrantStatus {
+	// Usage is persisted, so it is reported even for a stopped/revoked grant.
+	u := h.store.Usage(grantID)
+	st := GrantStatus{
+		TotalReqs:    int(u.Requests),
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+	}
+
 	h.mu.Lock()
 	hg, ok := h.grants[grantID]
 	h.mu.Unlock()
 	if !ok {
-		return GrantStatus{}
+		return st
 	}
 	hg.mu.Lock()
 	defer hg.mu.Unlock()
@@ -552,12 +592,10 @@ func (h *HostManager) Status(grantID string) GrantStatus {
 			online = true
 		}
 	}
-	return GrantStatus{
-		Online:    online,
-		Routing:   hg.activeReqs > 0,
-		Models:    append([]string(nil), hg.models...),
-		TotalReqs: hg.totalReqs,
-	}
+	st.Online = online
+	st.Routing = hg.activeReqs > 0
+	st.Models = append([]string(nil), hg.models...)
+	return st
 }
 
 func tagValue(ev *nostr.Event, name string) string {
