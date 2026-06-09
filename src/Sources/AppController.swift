@@ -12,6 +12,17 @@ final class AppController: ObservableObject {
     @Published var softError: String?
     @Published var lastUpdated: Date?
 
+    /// True while any grant (host) or connection (guest) is actively routing a
+    /// request. The same signal that drives the per-row "routing" badges; the
+    /// menu bar controller uses it to show the status-bar dot.
+    var isRouting: Bool {
+        grants.contains { $0.routing } || connections.contains { $0.routing }
+    }
+
+    /// Invoked on the main actor after every refresh so the menu bar status
+    /// item can update (e.g. start/stop the routing dot).
+    var onUpdate: (() -> Void)?
+
     let processes = ProcessManager.shared
     let providers = ProviderManager()
     var client = RouterClient()
@@ -50,6 +61,7 @@ final class AppController: ObservableObject {
             // The router may still be coming up; keep prior data, surface softly.
             softError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+        onUpdate?()
     }
 
     // MARK: Actions
