@@ -167,7 +167,7 @@ struct ShareTab: View {
     @State private var creating = false
 
     var body: some View {
-        // Sheets don't present from a MenuBarExtra window, so the create form is
+        // Sheets don't present from the menu bar popover, so the create form is
         // shown inline (it replaces the list until dismissed).
         if creating {
             CreateGrantView(onClose: { creating = false })
@@ -403,7 +403,7 @@ struct FooterView: View {
     }
 }
 
-// MARK: - Inline forms (presented in-place; MenuBarExtra can't host sheets)
+// MARK: - Inline forms (presented in-place; the menu bar popover can't host sheets)
 
 struct CreateGrantView: View {
     @EnvironmentObject var controller: AppController
