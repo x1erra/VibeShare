@@ -11,6 +11,7 @@ struct RouterStatus: Codable {
     var upstream: UpstreamStatus
     var nostr: NostrStatus
     var localModels: [String]?
+    var providerUsage: [String: ProviderUsage]?
 
     struct UpstreamStatus: Codable {
         var url: String
@@ -27,6 +28,50 @@ struct RouterStatus: Codable {
 
     var models: [String] { localModels ?? [] }
     var connectedRelayCount: Int { nostr.relays.filter { $0.connected }.count }
+}
+
+/// One provider's subscription window state, fetched by the router from that
+/// provider's usage endpoint and keyed by provider in RouterStatus.providerUsage.
+/// `hasData` is false until the router's first successful poll.
+struct ProviderUsage: Codable {
+    var updatedAt: Int64 = 0
+    var error: String?
+    var windows: [UsageWindow]?
+
+    var hasData: Bool { updatedAt > 0 }
+    var shownWindows: [UsageWindow] { windows ?? [] }
+}
+
+/// A single rate-limit window (e.g. "Session (5h)", "Weekly") for a provider.
+struct UsageWindow: Codable, Identifiable {
+    var label: String
+    var utilization: Double // percent used, 0...100
+    var resetsAt: String    // RFC3339 timestamp, "" if unknown
+
+    var id: String { label }
+    var percentUsed: Int { Int(min(max(utilization, 0), 100).rounded()) }
+
+    /// "resets in 2h 13m", or nil if the timestamp can't be parsed.
+    var resetText: String? {
+        guard let d = Self.parseISO(resetsAt) else { return nil }
+        let secs = max(0, d.timeIntervalSinceNow)
+        let f = DateComponentsFormatter()
+        f.allowedUnits = secs >= 3600 ? [.day, .hour, .minute] : [.minute]
+        f.unitsStyle = .abbreviated
+        f.maximumUnitCount = 2
+        return f.string(from: secs).map { "resets in \($0)" }
+    }
+
+    /// Parses an RFC3339 timestamp, tolerating microsecond fractions.
+    static func parseISO(_ s: String) -> Date? {
+        if s.isEmpty { return nil }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = iso.date(from: s) { return d }
+        iso.formatOptions = [.withInternetDateTime]
+        let stripped = s.replacingOccurrences(of: #"\.\d+"#, with: "", options: .regularExpression)
+        return iso.date(from: stripped)
+    }
 }
 
 struct GrantView: Codable, Identifiable {

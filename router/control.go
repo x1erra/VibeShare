@@ -50,6 +50,7 @@ type ControlServer struct {
 	upstream *Upstream
 	nostr    *NostrClient
 	bus      *EventBus
+	subUsage *SubscriptionMonitor
 }
 
 func (c *ControlServer) handler() http.Handler {
@@ -93,8 +94,9 @@ func (c *ControlServer) getStatus(w http.ResponseWriter, r *http.Request) {
 			"url":       cfg.UpstreamURL,
 			"reachable": c.upstream.Reachable(),
 		},
-		"nostr":       map[string]any{"relays": relays},
-		"localModels": c.upstream.ListModelIDs(),
+		"nostr":         map[string]any{"relays": relays},
+		"localModels":   c.upstream.ListModelIDs(),
+		"providerUsage": c.subUsage.MaybeRefresh(),
 	})
 }
 

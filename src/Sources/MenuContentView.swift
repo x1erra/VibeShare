@@ -123,26 +123,10 @@ struct ProvidersTab: View {
         SectionTitle("Your AI subscriptions",
                      subtitle: "Sign in once. Credentials are stored locally by cli-proxy-api.")
         ForEach(ProviderCatalog.all) { p in
-            let connected = providers.isConnected(p, localModels: localModels)
-            HStack {
-                Image(systemName: p.symbol).frame(width: 22).foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(p.name).font(.subheadline)
-                    Text(connected ? "Connected" : "Not connected")
-                        .font(.caption2)
-                        .foregroundStyle(connected ? Color.green : .secondary)
-                }
-                Spacer()
-                if providers.connecting.contains(p.key) {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Button(connected ? "Reconnect" : "Connect") {
-                        controller.connectProvider(p)
-                    }
-                    .controlSize(.small)
-                }
-            }
-            .padding(.vertical, 2)
+            ProviderRow(provider: p,
+                        connected: providers.isConnected(p, localModels: localModels),
+                        connecting: providers.connecting.contains(p.key),
+                        usage: controller.status?.providerUsage?[p.key])
         }
 
         if !localModels.isEmpty {
@@ -157,6 +141,80 @@ struct ProvidersTab: View {
             }
             .font(.caption)
         }
+    }
+}
+
+/// One provider as a card: the connect row, plus — for providers we can read the
+/// host's own subscription usage for (Claude, Codex) — the session/weekly limit
+/// windows underneath.
+struct ProviderRow: View {
+    @EnvironmentObject var controller: AppController
+    let provider: ProviderInfo
+    let connected: Bool
+    let connecting: Bool
+    let usage: ProviderUsage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: provider.symbol).frame(width: 22).foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(provider.name).font(.subheadline)
+                    Text(connected ? "Connected" : "Not connected")
+                        .font(.caption2)
+                        .foregroundStyle(connected ? Color.green : .secondary)
+                }
+                Spacer()
+                if connecting {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button(connected ? "Reconnect" : "Connect") {
+                        controller.connectProvider(provider)
+                    }
+                    .controlSize(.small)
+                }
+            }
+            if connected, let usage {
+                usageSection(usage)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+    }
+
+    @ViewBuilder
+    private func usageSection(_ usage: ProviderUsage) -> some View {
+        if usage.hasData, !usage.shownWindows.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(usage.shownWindows) { windowRow($0) }
+            }
+            .padding(.top, 2)
+        } else if let err = usage.error, !err.isEmpty {
+            Label("Limits: \(err)", systemImage: "exclamationmark.triangle")
+                .font(.caption2).foregroundStyle(.secondary)
+        } else {
+            Text("Loading subscription limits…")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private func windowRow(_ w: UsageWindow) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(w.label).font(.caption2)
+                Spacer()
+                Text(detail(w)).font(.caption2).foregroundStyle(.secondary)
+            }
+            ProgressView(value: min(max(w.utilization, 0), 100), total: 100)
+                .progressViewStyle(.linear)
+                .tint(w.percentUsed >= 90 ? .red : w.percentUsed >= 75 ? .orange : .blue)
+        }
+    }
+
+    private func detail(_ w: UsageWindow) -> String {
+        var parts = ["\(w.percentUsed)% used"]
+        if let r = w.resetText { parts.append(r) }
+        return parts.joined(separator: " · ")
     }
 }
 
