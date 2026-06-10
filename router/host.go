@@ -54,6 +54,7 @@ type HostManager struct {
 	store    *Store
 	nostr    *NostrClient
 	upstream *Upstream
+	subUsage *SubscriptionMonitor // host's own provider session-usage, for the reserve gate
 	ctx      context.Context
 	notify   func() // called when host-visible state changes (for SSE)
 	activity *ActivityLog
@@ -69,14 +70,16 @@ type hostGrant struct {
 	cancel context.CancelFunc
 	sem    chan struct{} // bounds concurrent proxied requests (maxConcurrentPerGrant)
 
-	mu            sync.Mutex
-	sessions      map[string]*hostSession
-	allowedModels []string
-	allowAll      bool
-	models        []string // advertised list (what guests see)
-	lastGuestSeen int64
-	activeReqs    int
-	warnedEmpty   bool // tracks the 0-models warning so we log only on transitions
+	mu               sync.Mutex
+	sessions         map[string]*hostSession
+	allowedModels    []string
+	allowAll         bool
+	models           []string // advertised list (what guests see)
+	shareNote        string   // why the list is fully empty (reserve gate), shown to the guest
+	limitedProviders []string // providers currently auto-paused by the reserve gate (partial or full)
+	lastGuestSeen    int64
+	activeReqs       int
+	warnedEmpty      bool // tracks the 0-models warning so we log only on transitions
 }
 
 type hostSession struct {
@@ -123,11 +126,12 @@ func (hs *hostSession) isAuthed() bool {
 	return hs.authed
 }
 
-func newHostManager(ctx context.Context, store *Store, nostr *NostrClient, upstream *Upstream, notify func(), activity *ActivityLog) *HostManager {
+func newHostManager(ctx context.Context, store *Store, nostr *NostrClient, upstream *Upstream, subUsage *SubscriptionMonitor, notify func(), activity *ActivityLog) *HostManager {
 	return &HostManager{
 		store:    store,
 		nostr:    nostr,
 		upstream: upstream,
+		subUsage: subUsage,
 		ctx:      ctx,
 		notify:   notify,
 		activity: activity,
@@ -175,6 +179,28 @@ func (h *HostManager) RefreshGrant(id string) {
 	}()
 }
 
+// RefreshAll recomputes shared models and re-broadcasts presence for every
+// active grant (e.g. after a config change to the session-reserve gate), so the
+// new state lands immediately instead of waiting for each grant's presence tick.
+func (h *HostManager) RefreshAll() {
+	h.mu.Lock()
+	grants := make([]*hostGrant, 0, len(h.grants))
+	for _, hg := range h.grants {
+		grants = append(grants, hg)
+	}
+	h.mu.Unlock()
+	if len(grants) == 0 {
+		return
+	}
+	go func() {
+		for _, hg := range grants {
+			h.recomputeModels(hg) // blocking upstream call — never under h.mu
+			h.sendPresence(hg)
+		}
+		h.notify()
+	}()
+}
+
 // caller holds h.mu
 func (h *HostManager) startGrant(g Grant) {
 	keys, err := deriveGrantKeys(g.Code)
@@ -200,19 +226,45 @@ func (h *HostManager) startGrant(g Grant) {
 	log.Printf("host: serving grant %q (room %s)", g.Label, keys.roomID[:8])
 }
 
+// grantPaused reports whether a grant is currently paused for the guest — either
+// individually (per-grant Pause) or by the global sharing master switch
+// (EnableSharing off). A paused grant advertises no models but keeps broadcasting
+// presence with Paused=true, so flipping the master switch off shows every friend
+// "paused" (like pausing each one) instead of letting them age out to offline.
+func (h *HostManager) grantPaused(hg *hostGrant) bool {
+	return !h.store.Config().EnableSharing || h.store.GrantPaused(hg.grant.ID)
+}
+
 func (h *HostManager) recomputeModels(hg *hostGrant) {
 	upstreamModels, _ := h.upstream.ListModels()
 	models, allowAll := computeSharedModels(hg.grant, upstreamModels)
-	paused := h.store.GrantPaused(hg.grant.ID)
+	paused := h.grantPaused(hg)
 	if paused {
 		// Paused: advertise nothing so the guest's /v1/models drops these, but
 		// keep presence flowing so the guest sees "paused" rather than offline.
 		models, allowAll = nil, false
 	}
+	// Session-reserve gate: when the host opted to keep a buffer, drop models of
+	// any monitored provider whose 5-hour session window is past the threshold.
+	// limited lists the providers it paused (partial: some models remain; full:
+	// none do) so both the host and the friend can show which ones are limited.
+	var limited []string
+	if !paused {
+		models, allowAll, limited = h.applyUsageReserve(models, allowAll)
+	}
+	reserved := len(limited) > 0
+	// When the reserve gate hides every shared model, the guest would otherwise
+	// see an online host it can't use; record why so presence can say "paused".
+	note := ""
+	if reserved && len(models) == 0 {
+		note = "reached their session usage limit — sharing resumes when it resets"
+	}
 	hg.mu.Lock()
 	hg.allowAll = allowAll
 	hg.models = models
 	hg.allowedModels = models
+	hg.shareNote = note
+	hg.limitedProviders = limited
 	empty := len(models) == 0 && !paused
 	transition := empty != hg.warnedEmpty
 	hg.warnedEmpty = empty
@@ -220,14 +272,94 @@ func (h *HostManager) recomputeModels(hg *hostGrant) {
 	hg.mu.Unlock()
 
 	// Surface the most common "nothing routes" cause: the provider engine isn't
-	// serving any models (cli-proxy-api down, or no provider connected).
+	// serving any models (cli-proxy-api down, or no provider connected) — unless
+	// the session-reserve gate is what trimmed the list, which is expected.
 	if transition {
-		if empty {
+		switch {
+		case empty && reserved:
+			log.Printf("host: grant %q is sharing 0 models — session usage is past your reserve buffer, will resume as the window resets", label)
+		case empty:
 			log.Printf("host: grant %q is sharing 0 models — connect a provider / check cli-proxy-api is running", label)
-		} else {
+		default:
 			log.Printf("host: grant %q now sharing %d models", label, len(models))
 		}
 	}
+}
+
+// applyUsageReserve removes models belonging to a monitored provider (claude,
+// codex) whose 5-hour session window has climbed past 100-reserve%, so the host
+// keeps the configured buffer of its own subscription. It fails open: a provider
+// with unknown usage (never polled, or its usage endpoint errored) is left
+// untouched. When it removes anything it returns allowAll=false so the trimmed
+// list — not a blanket allow — is what request-time enforcement consults.
+func (h *HostManager) applyUsageReserve(models []string, allowAll bool) (out []string, gatedAllowAll bool, limited []string) {
+	cfg := h.store.Config()
+	if !cfg.AutoStopSharing || cfg.UsageReservePercent <= 0 || cfg.UsageReservePercent >= 100 {
+		return models, allowAll, nil
+	}
+	if h.subUsage == nil {
+		return models, allowAll, nil
+	}
+	threshold := 100 - float64(cfg.UsageReservePercent)
+	blocked := map[string]bool{}
+	for _, p := range monitoredUsageProviders {
+		if util, known := h.subUsage.SessionUtilization(p); known && util >= threshold {
+			blocked[p] = true
+		}
+	}
+	if len(blocked) == 0 {
+		return models, allowAll, nil
+	}
+	kept := make([]string, 0, len(models))
+	removedProviders := map[string]bool{}
+	for _, m := range models {
+		if p := monitoredProviderForModel(m); p != "" && blocked[p] {
+			removedProviders[p] = true
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if len(removedProviders) == 0 {
+		return models, allowAll, nil // a blocked provider, but it shared no models here
+	}
+	for _, p := range monitoredUsageProviders { // stable, human order
+		if removedProviders[p] {
+			limited = append(limited, providerDisplayName(p))
+		}
+	}
+	return kept, false, limited
+}
+
+// providerDisplayName turns a provider key into the label shown in the UI.
+func providerDisplayName(key string) string {
+	switch key {
+	case "claude":
+		return "Claude"
+	case "codex":
+		return "Codex"
+	case "":
+		return ""
+	default:
+		return strings.ToUpper(key[:1]) + key[1:]
+	}
+}
+
+// monitoredUsageProviders are the providers SubscriptionMonitor can read a live
+// session window for, and thus the only ones the reserve gate can act on.
+var monitoredUsageProviders = []string{"claude", "codex"}
+
+// monitoredProviderForModel returns the monitored provider ("claude"/"codex")
+// a model belongs to, or "" if it is served by an unmonitored provider.
+func monitoredProviderForModel(modelID string) string {
+	lid := strings.ToLower(modelID)
+	for _, p := range monitoredUsageProviders {
+		for _, hint := range providerModelHints[p] {
+			if strings.Contains(lid, hint) {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 func computeSharedModels(g Grant, upstream []modelObject) (models []string, allowAll bool) {
@@ -295,23 +427,48 @@ func (h *HostManager) presenceLoop(ctx context.Context, hg *hostGrant) {
 	}
 }
 
-func (h *HostManager) sendPresence(hg *hostGrant) {
-	if !h.store.Config().EnableSharing {
-		return
-	}
+// buildPresence assembles the host presence a guest reads. When the grant is
+// paused (individually or via the master switch) it carries no models and
+// Paused=true, so the guest shows "paused" rather than aging out to "offline".
+func (h *HostManager) buildPresence(hg *hostGrant) presenceContent {
+	switched := h.grantPaused(hg) // master switch off, or this grant paused
 	hg.mu.Lock()
 	models := append([]string(nil), hg.models...)
+	note := hg.shareNote
+	limited := append([]string(nil), hg.limitedProviders...)
 	hg.mu.Unlock()
+	if switched {
+		models = nil
+	}
+	// A grant advertising no models can't serve anything, so present it as paused
+	// — otherwise the friend sees a green "online" host they can't actually use
+	// (e.g. the reserve gate hid every model). Reason explains why, except for a
+	// deliberate pause, which the guest UI already labels on its own.
+	paused := switched || len(models) == 0
+	reason := ""
+	if paused && !switched {
+		if reason = note; reason == "" {
+			reason = "isn't sharing any models right now"
+		}
+	}
 	u := h.store.Usage(hg.grant.ID)
-	content, err := sealJSON(hg.keys.announceKey, presenceContent{
-		Role:       "host",
-		Name:       h.store.Config().IdentityName,
-		Models:     models,
-		Paused:     h.store.GrantPaused(hg.grant.ID),
-		TokenLimit: h.store.GrantLimit(hg.grant.ID),
-		TokensUsed: u.InputTokens + u.OutputTokens,
-		TS:         time.Now().Unix(),
-	})
+	return presenceContent{
+		Role:             "host",
+		Name:             h.store.Config().IdentityName,
+		Models:           models,
+		Paused:           paused,
+		Reason:           reason,
+		LimitedProviders: limited,
+		TokenLimit:       h.store.GrantLimit(hg.grant.ID),
+		TokensUsed:       u.InputTokens + u.OutputTokens,
+		TS:               time.Now().Unix(),
+	}
+}
+
+func (h *HostManager) sendPresence(hg *hostGrant) {
+	// Always broadcast (even with the master switch off): going silent would age
+	// the guest out to "offline" with no reason shown; a paused presence doesn't.
+	content, err := sealJSON(hg.keys.announceKey, h.buildPresence(hg))
 	if err != nil {
 		return
 	}
@@ -692,12 +849,14 @@ func (h *HostManager) grantAllowsModel(hg *hostGrant, model string) bool {
 
 // GrantStatus is the host-side runtime view of one grant, for the control API.
 type GrantStatus struct {
-	Online       bool     `json:"online"`
-	Routing      bool     `json:"routing"`
-	Models       []string `json:"models"`
-	TotalReqs    int      `json:"totalReqs"`
-	InputTokens  int64    `json:"inputTokens"`
-	OutputTokens int64    `json:"outputTokens"`
+	Online           bool     `json:"online"`
+	Routing          bool     `json:"routing"`
+	Models           []string `json:"models"`
+	UsageLimited     bool     `json:"usageLimited"`     // reserve gate hid ALL of this grant's models (fully auto-paused)
+	LimitedProviders []string `json:"limitedProviders"` // providers the reserve gate paused (partial or full)
+	TotalReqs        int      `json:"totalReqs"`
+	InputTokens      int64    `json:"inputTokens"`
+	OutputTokens     int64    `json:"outputTokens"`
 }
 
 func (h *HostManager) Status(grantID string) GrantStatus {
@@ -726,6 +885,8 @@ func (h *HostManager) Status(grantID string) GrantStatus {
 	st.Online = online
 	st.Routing = hg.activeReqs > 0
 	st.Models = append([]string(nil), hg.models...)
+	st.UsageLimited = hg.shareNote != "" // reserve gate emptied ALL shared models
+	st.LimitedProviders = append([]string(nil), hg.limitedProviders...)
 	return st
 }
 

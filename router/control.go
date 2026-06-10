@@ -67,6 +67,7 @@ func (c *ControlServer) handler() http.Handler {
 	mux.HandleFunc("DELETE /api/connections/{id}", c.deleteConnection)
 	mux.HandleFunc("GET /api/config", c.getConfig)
 	mux.HandleFunc("PUT /api/config", c.putConfig)
+	mux.HandleFunc("POST /api/usage/{provider}/refresh", c.refreshUsage)
 	mux.HandleFunc("GET /api/events", c.events)
 	mux.HandleFunc("GET /api/activity", c.getActivity)
 	return loopbackGuard(mux)
@@ -88,11 +89,13 @@ func (c *ControlServer) getStatus(w http.ResponseWriter, r *http.Request) {
 		relays = append(relays, relayStatus{URL: u, Connected: connected[u]})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"running":        true,
-		"frontPort":      cfg.FrontPort,
-		"controlPort":    cfg.ControlPort,
-		"identityName":   cfg.IdentityName,
-		"sharingEnabled": cfg.EnableSharing,
+		"running":             true,
+		"frontPort":           cfg.FrontPort,
+		"controlPort":         cfg.ControlPort,
+		"identityName":        cfg.IdentityName,
+		"sharingEnabled":      cfg.EnableSharing,
+		"autoStopSharing":     cfg.AutoStopSharing,
+		"usageReservePercent": cfg.UsageReservePercent,
 		"upstream": map[string]any{
 			"url":       cfg.UpstreamURL,
 			"reachable": c.upstream.Reachable(),
@@ -114,6 +117,8 @@ type grantView struct {
 	Paused           bool     `json:"paused"`
 	Online           bool     `json:"online"`
 	Routing          bool     `json:"routing"`
+	UsageLimited     bool     `json:"usageLimited"`     // fully auto-paused: reserve gate hid ALL models
+	LimitedProviders []string `json:"limitedProviders"` // providers the reserve gate paused (partial or full)
 	AdvertisedModels []string `json:"advertisedModels"`
 	TotalReqs        int      `json:"totalReqs"`
 	InputTokens      int64    `json:"inputTokens"`
@@ -136,6 +141,8 @@ func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
 			Paused:           g.Paused,
 			Online:           st.Online,
 			Routing:          st.Routing,
+			UsageLimited:     st.UsageLimited,
+			LimitedProviders: nonNil(st.LimitedProviders),
 			AdvertisedModels: nonNil(st.Models),
 			TotalReqs:        st.TotalReqs,
 			InputTokens:      st.InputTokens,
@@ -250,19 +257,21 @@ func (c *ControlServer) deleteGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 type connectionView struct {
-	ID           string   `json:"id"`
-	Label        string   `json:"label"`
-	RedeemedAt   int64    `json:"redeemedAt"`
-	Online       bool     `json:"online"`
-	Routing      bool     `json:"routing"`
-	Paused       bool     `json:"paused"` // host paused sharing (still online)
-	HostName     string   `json:"hostName"`
-	Models       []string `json:"models"`
-	TotalReqs    int      `json:"totalReqs"`
-	InputTokens  int64    `json:"inputTokens"`
-	OutputTokens int64    `json:"outputTokens"`
-	TokenLimit   int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
-	TokensUsed   int64    `json:"tokensUsed"` // host-authoritative usage
+	ID               string   `json:"id"`
+	Label            string   `json:"label"`
+	RedeemedAt       int64    `json:"redeemedAt"`
+	Online           bool     `json:"online"`
+	Routing          bool     `json:"routing"`
+	Paused           bool     `json:"paused"`                     // host paused sharing (still online)
+	PausedReason     string   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
+	LimitedProviders []string `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve
+	HostName         string   `json:"hostName"`
+	Models           []string `json:"models"`
+	TotalReqs        int      `json:"totalReqs"`
+	InputTokens      int64    `json:"inputTokens"`
+	OutputTokens     int64    `json:"outputTokens"`
+	TokenLimit       int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
+	TokensUsed       int64    `json:"tokensUsed"` // host-authoritative usage
 }
 
 func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) {
@@ -270,19 +279,21 @@ func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) 
 	for _, conn := range c.store.Connections() {
 		st := c.guest.Status(conn.ID)
 		out = append(out, connectionView{
-			ID:           conn.ID,
-			Label:        conn.Label,
-			RedeemedAt:   conn.RedeemedAt,
-			Online:       st.Online,
-			Routing:      st.Routing,
-			Paused:       st.Paused,
-			HostName:     st.HostName,
-			Models:       nonNil(st.Models),
-			TotalReqs:    st.TotalReqs,
-			InputTokens:  st.InputTokens,
-			OutputTokens: st.OutputTokens,
-			TokenLimit:   st.TokenLimit,
-			TokensUsed:   st.TokensUsed,
+			ID:               conn.ID,
+			Label:            conn.Label,
+			RedeemedAt:       conn.RedeemedAt,
+			Online:           st.Online,
+			Routing:          st.Routing,
+			Paused:           st.Paused,
+			PausedReason:     st.PausedReason,
+			LimitedProviders: nonNil(st.LimitedProviders),
+			HostName:         st.HostName,
+			Models:           nonNil(st.Models),
+			TotalReqs:        st.TotalReqs,
+			InputTokens:      st.InputTokens,
+			OutputTokens:     st.OutputTokens,
+			TokenLimit:       st.TokenLimit,
+			TokensUsed:       st.TokensUsed,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -340,16 +351,38 @@ func (c *ControlServer) getConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c.store.Config())
 }
 
+// refreshUsage forces an immediate provider-usage fetch (the UI's refresh
+// button), bypassing the 10-minute cache, and returns the fresh snapshot.
+func (c *ControlServer) refreshUsage(w http.ResponseWriter, r *http.Request) {
+	snap, ok := c.subUsage.Refresh(r.PathValue("provider"))
+	if !ok {
+		http.Error(w, "unknown provider", http.StatusBadRequest)
+		return
+	}
+	c.bus.Notify() // nudge SSE clients to re-read the fresh usage
+	writeJSON(w, http.StatusOK, snap)
+}
+
 func (c *ControlServer) putConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := c.store.Config()
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
+	// Keep the reserve in a sane band; the gate no-ops outside (0,100) anyway.
+	if cfg.UsageReservePercent < 0 {
+		cfg.UsageReservePercent = 0
+	}
+	if cfg.UsageReservePercent > 95 {
+		cfg.UsageReservePercent = 95
+	}
 	if err := c.store.SetConfig(cfg); err != nil {
 		http.Error(w, "save failed", http.StatusInternalServerError)
 		return
 	}
+	// Re-evaluate every grant's shared models now (reserve / sharing toggles) so
+	// the change lands immediately instead of on the next 20s presence tick.
+	c.host.RefreshAll()
 	c.bus.Notify()
 	writeJSON(w, http.StatusOK, cfg)
 }

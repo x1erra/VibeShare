@@ -6,6 +6,8 @@ struct ShareTab: View {
     @EnvironmentObject var controller: AppController
     @State private var creating = false
 
+    private var sharingOn: Bool { controller.status?.sharingEnabled ?? true }
+
     var body: some View {
         // Sheets don't present from the menu bar popover, so the create form is
         // shown inline (it replaces the list until dismissed).
@@ -23,6 +25,18 @@ struct ShareTab: View {
             }
 
             allotmentSummary
+
+            if !sharingOn && !controller.grants.filter({ !$0.revoked }).isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "pause.circle.fill")
+                    Text("Sharing is off — every friend is paused. Turn it back on from the switch up top.")
+                        .font(.caption2)
+                    Spacer()
+                }
+                .foregroundStyle(.orange)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+            }
 
             if controller.grants.filter({ !$0.revoked }).isEmpty {
                 EmptyHint(icon: "square.and.arrow.up",
@@ -71,10 +85,19 @@ struct GrantRow: View {
                 if grant.routing { Badge(text: "routing", color: .blue) }
                 if grant.paused {
                     Badge(text: "paused", color: .orange)
+                } else if grant.usageLimited {
+                    Badge(text: "auto-paused", color: .orange)
                 } else {
                     Badge(text: grant.online ? "online" : "offline",
                           color: grant.online ? .green : .secondary)
+                    // Some (not all) of this grant's providers hit the reserve.
+                    if !grant.limitedProviders.isEmpty {
+                        Badge(text: "limited", color: .orange)
+                    }
                 }
+            }
+            if !grant.paused, !grant.limitedProviders.isEmpty {
+                Text(reserveNote).font(.caption2).foregroundStyle(.orange)
             }
             HStack(spacing: 6) {
                 // The code is a bearer credential — mask it unless revealed.
@@ -121,7 +144,17 @@ struct GrantRow: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-        .opacity(grant.paused ? 0.75 : 1)
+        .opacity(grant.paused || grant.usageLimited ? 0.75 : 1)
+    }
+
+    /// Host-facing explanation when the session-reserve gate has paused some or
+    /// all of this grant's providers.
+    private var reserveNote: String {
+        let names = grant.limitedProviders.joined(separator: " & ")
+        if grant.advertisedModels.isEmpty {
+            return "\(names) auto-paused — your session usage reached your reserve. Sharing resumes when the window resets."
+        }
+        return "\(names) auto-paused (session reserve reached) — your other models are still shared."
     }
 
     /// Same length and shape as the real code ("VS-" and hyphens kept, the rest

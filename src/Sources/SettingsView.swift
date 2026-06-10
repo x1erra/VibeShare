@@ -7,6 +7,7 @@ struct SettingsTab: View {
     @State private var name: String = ""
     @State private var nameSaved = false
     @State private var sharing: Bool = true
+    @State private var reserve: Double = 20
     @State private var notifyFriends = NotificationManager.shared.friendEventsEnabled
     @State private var notifyAllotment = NotificationManager.shared.allotmentEnabled
     @State private var editingRelays = false
@@ -27,6 +28,8 @@ struct SettingsTab: View {
 
     var body: some View {
         identitySection
+        Divider().padding(.vertical, 4)
+        sessionReserveSection
         Divider().padding(.vertical, 4)
         notificationsSection
         Divider().padding(.vertical, 4)
@@ -54,6 +57,7 @@ struct SettingsTab: View {
         .onAppear {
             name = controller.status?.identityName ?? ""
             sharing = controller.status?.sharingEnabled ?? true
+            reserve = Double(controller.status?.usageReserve ?? 20)
         }
 
         Toggle("Enable peer-to-peer sharing", isOn: $sharing)
@@ -76,6 +80,77 @@ struct SettingsTab: View {
             }
             Text("Available when running the packaged VibeShare.app (make app).")
                 .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Session reserve
+
+    private var autoStopOn: Bool { controller.status?.autoStopSharingOn ?? false }
+
+    @ViewBuilder
+    private var sessionReserveSection: some View {
+        SectionTitle("Session reserve",
+                     subtitle: "Keep a buffer of each provider's subscription for yourself.")
+        Toggle("Stop sharing a provider when its session runs low", isOn: Binding(
+            get: { autoStopOn },
+            set: { on in Task { await controller.setUsageReserve(enabled: on, percent: Int(reserve)) } }
+        ))
+        .font(.subheadline)
+        .help("Tracks each provider's 5-hour session window separately, so a busy Claude window stops Claude sharing while Codex keeps flowing.")
+        // Re-seed the slider whenever the server's value changes (e.g. it first
+        // loads after this view appeared) so toggling on never writes a stale
+        // reserve. It only fires on a real change — never mid-drag, which commits
+        // only on release — so it can't fight an active drag.
+        .onChange(of: controller.status?.usageReserve) { reserve = Double($0 ?? 20) }
+
+        if autoStopOn {
+            HStack {
+                Text("Reserve \(Int(reserve))% for me").font(.subheadline)
+                Spacer()
+                Text("stops at \(max(0, 100 - Int(reserve)))% used")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            Slider(value: $reserve, in: 5...80, step: 5) { editing in
+                if !editing {
+                    Task { await controller.setUsageReserve(enabled: true, percent: Int(reserve)) }
+                }
+            }
+            Text("When a provider's session passes \(max(0, 100 - Int(reserve)))% used, its models stop being shared and resume automatically once the window resets.")
+                .font(.caption2).foregroundStyle(.secondary)
+            sessionUsageReadout
+        }
+    }
+
+    /// Shows where each tracked provider's session currently sits, highlighting any
+    /// already past the stop threshold so the effect of the slider is visible.
+    @ViewBuilder
+    private var sessionUsageReadout: some View {
+        let usage = controller.status?.providerUsage ?? [:]
+        let threshold = max(0, 100 - Int(reserve))
+        let rows: [(name: String, window: UsageWindow)] = [("Claude", "claude"), ("Codex", "codex")]
+            .compactMap { name, key in
+                guard let w = usage[key]?.shownWindows
+                    .first(where: { $0.label.lowercased().hasPrefix("session") }) else { return nil }
+                return (name, w)
+            }
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(rows, id: \.name) { row in
+                    // Compare the raw utilization (not the rounded percent) so this
+                    // indicator matches the Go gate's `util >= threshold` exactly.
+                    let paused = row.window.utilization >= Double(threshold)
+                    HStack {
+                        Text(row.name).font(.caption2)
+                        Spacer()
+                        Text(paused
+                             ? "\(row.window.percentUsed)% used · sharing paused"
+                             : "\(row.window.percentUsed)% used")
+                            .font(.caption2)
+                            .foregroundStyle(paused ? Color.orange : Color.secondary)
+                    }
+                }
+            }
+            .padding(.top, 2)
         }
     }
 

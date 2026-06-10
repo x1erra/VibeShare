@@ -88,7 +88,7 @@ func main() {
 	nostr := newNostrClient(cfg.NostrRelays)
 	nostr.Start(ctx)
 
-	hostMgr := newHostManager(ctx, store, nostr, upstream, bus.Notify, activity)
+	hostMgr := newHostManager(ctx, store, nostr, upstream, subUsage, bus.Notify, activity)
 	guestMgr := newGuestManager(ctx, store, nostr, bus.Notify, activity)
 	hostMgr.Reconcile()
 	guestMgr.Reconcile()

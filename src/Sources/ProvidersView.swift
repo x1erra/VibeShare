@@ -56,6 +56,7 @@ struct ProviderRow: View {
     let usage: ProviderUsage?
     let error: String?
     let logURL: URL
+    @State private var refreshing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -111,17 +112,45 @@ struct ProviderRow: View {
 
     @ViewBuilder
     private func usageSection(_ usage: ProviderUsage) -> some View {
-        if usage.hasData, !usage.shownWindows.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(usage.shownWindows) { windowRow($0) }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Text("Subscription limits").font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                refreshButton
             }
-            .padding(.top, 2)
-        } else if let err = usage.error, !err.isEmpty {
-            Label("Limits: \(err)", systemImage: "exclamationmark.triangle")
-                .font(.caption2).foregroundStyle(.secondary)
+            if usage.hasData, !usage.shownWindows.isEmpty {
+                ForEach(usage.shownWindows) { windowRow($0) }
+            } else if let err = usage.error, !err.isEmpty {
+                Label("Limits: \(err)", systemImage: "exclamationmark.triangle")
+                    .font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Text("Loading subscription limits…")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    /// Subtle per-provider button to refetch usage now (bypasses the 10-min cache).
+    @ViewBuilder
+    private var refreshButton: some View {
+        if refreshing {
+            ProgressView().controlSize(.mini)
         } else {
-            Text("Loading subscription limits…")
-                .font(.caption2).foregroundStyle(.secondary)
+            Button {
+                refreshing = true
+                Task {
+                    await controller.refreshUsage(provider.key)
+                    refreshing = false
+                }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption2)
+                    .frame(width: 16, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh \(provider.name) usage now")
         }
     }
 

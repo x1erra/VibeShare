@@ -48,10 +48,16 @@ struct ConnectionRow: View {
                 } else {
                     Badge(text: connection.online ? "online" : "offline",
                           color: connection.online ? .green : .secondary)
+                    // Some (not all) of this friend's providers hit their reserve.
+                    if connection.online && !connection.limitedProviders.isEmpty {
+                        Badge(text: "limited", color: .orange)
+                    }
                 }
             }
             if connection.paused && connection.online {
-                Text("\(displayName) paused sharing — their models are hidden until they resume.")
+                Text(connection.pausedReason.isEmpty
+                     ? "\(displayName) paused sharing — their models are hidden until they resume."
+                     : "\(displayName) \(connection.pausedReason)")
                     .font(.caption2).foregroundStyle(.orange)
             } else if !connection.models.isEmpty {
                 Text(connection.models.prefix(4).joined(separator: ", ")
@@ -61,6 +67,12 @@ struct ConnectionRow: View {
             } else {
                 Text(connection.online ? "Waiting for shared model list…" : "Friend is offline")
                     .font(.caption2).foregroundStyle(.secondary)
+            }
+            // Partial limit: friend is online with some models, but a provider is
+            // auto-paused by their reserve. (Full pause shows above via `paused`.)
+            if connection.online, !connection.paused, !connection.limitedProviders.isEmpty {
+                Text("\(connection.limitedProviders.joined(separator: " & ")) paused (their session limit) — other models still available.")
+                    .font(.caption2).foregroundStyle(.orange)
             }
             if connection.hasLimit {
                 VStack(alignment: .leading, spacing: 3) {

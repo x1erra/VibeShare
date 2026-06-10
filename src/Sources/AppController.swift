@@ -215,6 +215,28 @@ final class AppController: ObservableObject {
         await refresh()
     }
 
+    /// Force an immediate subscription-usage refetch for one provider (the
+    /// refresh button), bypassing the router's 10-minute cache.
+    func refreshUsage(_ provider: String) async {
+        do {
+            try await client.refreshUsage(provider: provider)
+            await refresh()
+        } catch {
+            softError = error.localizedDescription
+        }
+    }
+
+    /// Configure the session-usage reserve: when `enabled`, the host stops
+    /// sharing a provider's models once that provider's 5-hour session window
+    /// passes `100 - percent`, keeping `percent`% of each subscription in reserve.
+    func setUsageReserve(enabled: Bool, percent: Int) async {
+        guard var cfg = try? await client.config() else { return }
+        cfg.autoStopSharing = enabled
+        cfg.usageReservePercent = percent
+        try? await client.updateConfig(cfg)
+        await refresh()
+    }
+
     /// Replace the signaling relay set. Relays are read at router start, so the
     /// router is restarted afterwards (the UI shows it reconnecting).
     func setRelays(_ relays: [String]) async -> Bool {

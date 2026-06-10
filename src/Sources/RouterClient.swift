@@ -80,6 +80,11 @@ struct RouterClient {
         let data = try JSONEncoder().encode(cfg)
         _ = try await raw("/api/config", method: "PUT", body: data)
     }
+    /// Force an immediate usage refetch for one provider (bypasses the 10-min
+    /// cache). The longer timeout covers the provider's own usage endpoint.
+    func refreshUsage(provider: String) async throws {
+        _ = try await raw("/api/usage/\(provider)/refresh", method: "POST", body: nil, timeout: 25)
+    }
 
     // MARK: Plumbing
 
@@ -102,14 +107,14 @@ struct RouterClient {
         }
     }
 
-    private func raw(_ path: String, method: String, body: Data?) async throws -> Data {
+    private func raw(_ path: String, method: String, body: Data?, timeout: TimeInterval = 10) async throws -> Data {
         // Relative resolution (not appendingPathComponent) so query strings work.
         guard let url = URL(string: path, relativeTo: base) else {
             throw ClientError.http(0, "bad path \(path)")
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.timeoutInterval = 10
+        req.timeoutInterval = timeout
         if let body {
             req.httpBody = body
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
