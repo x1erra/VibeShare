@@ -120,6 +120,7 @@ struct RedeemView: View {
     @State private var label = ""
     @State private var working = false
     @State private var error: String?
+    @FocusState private var codeFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -133,7 +134,11 @@ struct RedeemView: View {
             TextField("VS-XXXX-XXXX-…", text: $code)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.callout, design: .monospaced))
-            TextField("Label (e.g. Brandon)", text: $label)
+                .focused($codeFieldFocused)
+                .onAppear {
+                    DispatchQueue.main.async { codeFieldFocused = true }
+                }
+            TextField("Label", text: $label)
                 .textFieldStyle(.roundedBorder)
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red)

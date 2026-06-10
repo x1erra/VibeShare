@@ -12,6 +12,7 @@ struct SettingsTab: View {
     @State private var editingRelays = false
     @State private var relaysDraft = ""
     @State private var relaysRestarting = false
+    @FocusState private var relaysFieldFocused: Bool
 
     private var upstreamOK: Bool { controller.status?.upstream.reachable ?? false }
 
@@ -118,6 +119,10 @@ struct SettingsTab: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.caption2, design: .monospaced))
                 .lineLimit(3...8)
+                .focused($relaysFieldFocused)
+                .onAppear {
+                    DispatchQueue.main.async { relaysFieldFocused = true }
+                }
             HStack {
                 Button("Cancel") { editingRelays = false }
                     .controlSize(.small)
