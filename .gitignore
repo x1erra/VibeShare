@@ -5,6 +5,7 @@ src/*.xcodeproj
 
 # Go
 router/vibeshare-router
+router/router
 
 # Bundled binaries (downloaded/built — not committed)
 src/Sources/Resources/vibeshare-router
