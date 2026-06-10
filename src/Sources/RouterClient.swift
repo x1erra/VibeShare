@@ -34,10 +34,14 @@ struct RouterClient {
     // MARK: Writes
 
     @discardableResult
-    func createGrant(label: String, providers: [String], models: [String]) async throws -> GrantView {
+    func createGrant(label: String, providers: [String], models: [String], tokenLimit: Int) async throws -> GrantView {
         try await send("/api/grants", method: "POST", body: [
-            "label": label, "providers": providers, "models": models,
+            "label": label, "providers": providers, "models": models, "tokenLimit": tokenLimit,
         ])
+    }
+    func updateGrantLimit(id: String, tokenLimit: Int) async throws {
+        let data = try JSONSerialization.data(withJSONObject: ["tokenLimit": tokenLimit])
+        _ = try await raw("/api/grants/\(id)", method: "PATCH", body: data)
     }
     func revokeGrant(id: String) async throws {
         _ = try await raw("/api/grants/\(id)", method: "DELETE", body: nil)

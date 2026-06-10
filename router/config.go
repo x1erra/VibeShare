@@ -2,11 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 )
+
+// errGrantNotFound lets callers map a missing grant to an HTTP 404 instead of a
+// silent success.
+var errGrantNotFound = errors.New("grant not found")
 
 // defaultNostrRelays are public Nostr relays used purely for signaling and
 // encrypted presence. They never see plaintext.
@@ -45,13 +50,14 @@ func defaultConfig() Config {
 // Grant is a share I issued (host role). The secret code is stored so the room
 // can be re-derived across restarts.
 type Grant struct {
-	ID        string   `json:"id"`
-	Label     string   `json:"label"`     // friend name, e.g. "Steve"
-	Code      string   `json:"code"`      // canonical (compact) grant code — secret
-	Providers []string `json:"providers"` // provider keys exposed (e.g. ["claude"])
-	Models    []string `json:"models"`    // optional explicit model allow-list; empty = derive from providers
-	CreatedAt int64    `json:"createdAt"`
-	Revoked   bool     `json:"revoked"`
+	ID         string   `json:"id"`
+	Label      string   `json:"label"`      // friend name, e.g. "Steve"
+	Code       string   `json:"code"`       // canonical (compact) grant code — secret
+	Providers  []string `json:"providers"`  // provider keys exposed (e.g. ["claude"])
+	Models     []string `json:"models"`     // optional explicit model allow-list; empty = derive from providers
+	TokenLimit int64    `json:"tokenLimit"` // 0 = unlimited; max total (input+output) tokens this friend may use
+	CreatedAt  int64    `json:"createdAt"`
+	Revoked    bool     `json:"revoked"`
 }
 
 // Connection is a share I hold (guest role).
@@ -182,6 +188,42 @@ func (s *Store) RevokeGrant(id string) error {
 	}
 	grants := append([]Grant(nil), s.grants...)
 	s.mu.Unlock()
+	return saveJSON(filepath.Join(s.dir, "grants.json"), grants)
+}
+
+// GrantLimit returns the token allotment for a grant (0 = unlimited). Read live
+// from the store so a top-up takes effect immediately, without restarting the
+// grant's host worker.
+func (s *Store) GrantLimit(id string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, g := range s.grants {
+		if g.ID == id {
+			return g.TokenLimit
+		}
+	}
+	return 0
+}
+
+// SetGrantLimit updates a grant's token allotment (host can raise/lower or
+// top-up after the code was issued) and persists it.
+func (s *Store) SetGrantLimit(id string, limit int64) error {
+	if limit < 0 {
+		limit = 0
+	}
+	s.mu.Lock()
+	found := false
+	for i := range s.grants {
+		if s.grants[i].ID == id {
+			s.grants[i].TokenLimit = limit
+			found = true
+		}
+	}
+	grants := append([]Grant(nil), s.grants...)
+	s.mu.Unlock()
+	if !found {
+		return errGrantNotFound
+	}
 	return saveJSON(filepath.Join(s.dir, "grants.json"), grants)
 }
 

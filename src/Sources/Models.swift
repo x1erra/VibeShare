@@ -43,8 +43,15 @@ struct GrantView: Codable, Identifiable {
     var totalReqs: Int
     var inputTokens: Int
     var outputTokens: Int
+    var tokenLimit: Int // 0 = unlimited
 
     var totalTokens: Int { inputTokens + outputTokens }
+
+    /// Whether this friend has a capped allotment.
+    var hasLimit: Bool { tokenLimit > 0 }
+    /// Tokens left in the allotment (host side: the host's own tally is the
+    /// authoritative meter). Only meaningful when `hasLimit`.
+    var remaining: Int { max(0, tokenLimit - totalTokens) }
 
     // Tolerant decoding: a null or missing field defaults instead of throwing,
     // so create vs. list response shapes can never crash the UI.
@@ -63,6 +70,7 @@ struct GrantView: Codable, Identifiable {
         totalReqs = try c.decodeIfPresent(Int.self, forKey: .totalReqs) ?? 0
         inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
         outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
+        tokenLimit = try c.decodeIfPresent(Int.self, forKey: .tokenLimit) ?? 0
     }
 }
 
@@ -77,8 +85,17 @@ struct ConnectionView: Codable, Identifiable {
     var totalReqs: Int
     var inputTokens: Int
     var outputTokens: Int
+    var tokenLimit: Int // host-advertised allotment, 0 = unlimited
+    var tokensUsed: Int // host-authoritative usage, drives remaining
 
     var totalTokens: Int { inputTokens + outputTokens }
+
+    /// Whether the host capped this connection's allotment.
+    var hasLimit: Bool { tokenLimit > 0 }
+    /// Tokens left in your allotment (guest side: uses the host's authoritative
+    /// tally, which is what the host actually enforces). Only meaningful when
+    /// `hasLimit`.
+    var remaining: Int { max(0, tokenLimit - tokensUsed) }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -92,6 +109,8 @@ struct ConnectionView: Codable, Identifiable {
         totalReqs = try c.decodeIfPresent(Int.self, forKey: .totalReqs) ?? 0
         inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
         outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
+        tokenLimit = try c.decodeIfPresent(Int.self, forKey: .tokenLimit) ?? 0
+        tokensUsed = try c.decodeIfPresent(Int.self, forKey: .tokensUsed) ?? 0
     }
 }
 

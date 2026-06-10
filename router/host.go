@@ -266,11 +266,14 @@ func (h *HostManager) sendPresence(hg *hostGrant) {
 	hg.mu.Lock()
 	models := append([]string(nil), hg.models...)
 	hg.mu.Unlock()
+	u := h.store.Usage(hg.grant.ID)
 	content, err := sealJSON(hg.keys.announceKey, presenceContent{
-		Role:   "host",
-		Name:   h.store.Config().IdentityName,
-		Models: models,
-		TS:     time.Now().Unix(),
+		Role:       "host",
+		Name:       h.store.Config().IdentityName,
+		Models:     models,
+		TokenLimit: h.store.GrantLimit(hg.grant.ID),
+		TokensUsed: u.InputTokens + u.OutputTokens,
+		TS:         time.Now().Unix(),
 	})
 	if err != nil {
 		return
@@ -480,6 +483,18 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	if !h.grantAllowsModel(hg, probe.Model) {
 		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "model not shared: " + probe.Model})
 		return
+	}
+
+	// Enforce the friend's token allotment before spending any of the host's
+	// subscription. Read live from the store so top-ups apply immediately. This
+	// is a soft cap: a request already in flight may carry the tally slightly
+	// past the limit, but the next one is refused.
+	if limit := h.store.GrantLimit(hg.grant.ID); limit > 0 {
+		u := h.store.Usage(hg.grant.ID)
+		if u.InputTokens+u.OutputTokens >= limit {
+			_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "token allotment exhausted — ask your friend to top it up"})
+			return
+		}
 	}
 
 	if method == "" {
