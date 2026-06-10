@@ -60,6 +60,7 @@ struct GrantRow: View {
     @State private var editingLimit = false
     @State private var limitDraft = ""
     @State private var codeRevealed = false
+    @FocusState private var limitFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -139,7 +140,13 @@ struct GrantRow: View {
                 Image(systemName: "chart.bar.fill").font(.caption2).foregroundStyle(.secondary)
                 TextField("Unlimited", text: $limitDraft)
                     .textFieldStyle(.roundedBorder).frame(width: 90).controlSize(.small)
+                    .focused($limitFieldFocused)
                     .onSubmit { saveLimit() } // Return saves, no extra click
+                    .onAppear {
+                        // Deferred a tick so the field exists before focusing
+                        // (popover quirk) — type immediately after hitting ✎.
+                        DispatchQueue.main.async { limitFieldFocused = true }
+                    }
                 Text("tokens (e.g. 500k, 2m)").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Button("Save") { saveLimit() }
@@ -219,9 +226,10 @@ struct CreateGrantView: View {
     @State private var scope: ShareScope = .everything
     @State private var selectedProviders: Set<String> = []
     @State private var selectedModels: Set<String> = []
-    @State private var allotment = "" // millions of tokens; blank = unlimited
+    @State private var allotment = "" // token count; blank = unlimited
     @State private var creating = false
     @State private var createdCode: String?
+    @FocusState private var nameFieldFocused: Bool
 
     private var localModels: [String] { controller.status?.models ?? [] }
 
@@ -263,6 +271,10 @@ struct CreateGrantView: View {
                 Text("Who is this for?").font(.subheadline)
                 TextField("Friend's name (e.g. Steve)", text: $label)
                     .textFieldStyle(.roundedBorder)
+                    .focused($nameFieldFocused)
+                    .onAppear {
+                        DispatchQueue.main.async { nameFieldFocused = true }
+                    }
 
                 Text("Token allotment").font(.subheadline)
                 HStack(spacing: 6) {
