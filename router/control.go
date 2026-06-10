@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -50,6 +51,7 @@ type ControlServer struct {
 	upstream *Upstream
 	nostr    *NostrClient
 	bus      *EventBus
+	activity *ActivityLog
 	subUsage *SubscriptionMonitor
 }
 
@@ -66,6 +68,7 @@ func (c *ControlServer) handler() http.Handler {
 	mux.HandleFunc("GET /api/config", c.getConfig)
 	mux.HandleFunc("PUT /api/config", c.putConfig)
 	mux.HandleFunc("GET /api/events", c.events)
+	mux.HandleFunc("GET /api/activity", c.getActivity)
 	return withCORS(mux)
 }
 
@@ -108,6 +111,7 @@ type grantView struct {
 	Models           []string `json:"models"`
 	CreatedAt        int64    `json:"createdAt"`
 	Revoked          bool     `json:"revoked"`
+	Paused           bool     `json:"paused"`
 	Online           bool     `json:"online"`
 	Routing          bool     `json:"routing"`
 	AdvertisedModels []string `json:"advertisedModels"`
@@ -129,6 +133,7 @@ func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
 			Models:           nonNil(g.Models),
 			CreatedAt:        g.CreatedAt,
 			Revoked:          g.Revoked,
+			Paused:           g.Paused,
 			Online:           st.Online,
 			Routing:          st.Routing,
 			AdvertisedModels: nonNil(st.Models),
@@ -192,25 +197,42 @@ func (c *ControlServer) createGrant(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// updateGrant changes a grant's token allotment (top-up / adjust) after the code
-// was issued. Enforcement and presence read the limit live, so the change takes
+// updateGrant changes a grant's token allotment (top-up / adjust) and/or pauses
+// or resumes it after the code was issued. Fields are optional — only those
+// present are applied. Enforcement and presence read both live, so changes take
 // effect on the next request without restarting the grant.
 func (c *ControlServer) updateGrant(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var in struct {
-		TokenLimit int64 `json:"tokenLimit"`
+		TokenLimit *int64 `json:"tokenLimit"`
+		Paused     *bool  `json:"paused"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	if err := c.store.SetGrantLimit(id, in.TokenLimit); err != nil {
+	apply := func(err error) bool {
+		if err == nil {
+			return true
+		}
 		if errors.Is(err, errGrantNotFound) {
 			http.Error(w, "grant not found", http.StatusNotFound)
 		} else {
 			http.Error(w, "save failed", http.StatusInternalServerError)
 		}
+		return false
+	}
+	if in.TokenLimit != nil && !apply(c.store.SetGrantLimit(id, *in.TokenLimit)) {
 		return
+	}
+	if in.Paused != nil && !apply(c.store.SetGrantPaused(id, *in.Paused)) {
+		return
+	}
+	if in.TokenLimit != nil || in.Paused != nil {
+		// Push the new state to the guest right away instead of waiting for the
+		// next 20s presence tick (presence carries paused + limit + usage, which
+		// guests use to rank hosts when several share a model).
+		c.host.RefreshGrant(id)
 	}
 	c.bus.Notify()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -233,6 +255,7 @@ type connectionView struct {
 	RedeemedAt   int64    `json:"redeemedAt"`
 	Online       bool     `json:"online"`
 	Routing      bool     `json:"routing"`
+	Paused       bool     `json:"paused"` // host paused sharing (still online)
 	HostName     string   `json:"hostName"`
 	Models       []string `json:"models"`
 	TotalReqs    int      `json:"totalReqs"`
@@ -252,6 +275,7 @@ func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) 
 			RedeemedAt:   conn.RedeemedAt,
 			Online:       st.Online,
 			Routing:      st.Routing,
+			Paused:       st.Paused,
 			HostName:     st.HostName,
 			Models:       nonNil(st.Models),
 			TotalReqs:    st.TotalReqs,
@@ -328,6 +352,17 @@ func (c *ControlServer) putConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	c.bus.Notify()
 	writeJSON(w, http.StatusOK, cfg)
+}
+
+// getActivity returns recent routed requests, newest first (?limit=N, default 50).
+func (c *ControlServer) getActivity(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	writeJSON(w, http.StatusOK, c.activity.List(limit))
 }
 
 func (c *ControlServer) events(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,13 +18,15 @@ import (
 
 // GuestManager runs the guest side of every held connection.
 type GuestManager struct {
-	store  *Store
-	nostr  *NostrClient
-	ctx    context.Context
-	notify func()
+	store    *Store
+	nostr    *NostrClient
+	ctx      context.Context
+	notify   func()
+	activity *ActivityLog
 
-	mu    sync.Mutex
-	conns map[string]*guestConn
+	mu       sync.Mutex
+	conns    map[string]*guestConn
+	lastHost map[string]string // model -> connection ID that last served it (sticky routing)
 }
 
 type guestConn struct {
@@ -34,6 +38,7 @@ type guestConn struct {
 	mu         sync.Mutex
 	hostName   string
 	hostModels []string
+	hostPaused bool  // host paused sharing (still online, advertising 0 models)
 	tokenLimit int64 // host-advertised allotment for this connection (0 = unlimited)
 	tokensUsed int64 // host-authoritative tokens consumed so far
 	lastSeen   int64
@@ -73,13 +78,15 @@ type respEvent struct {
 	msg    string
 }
 
-func newGuestManager(ctx context.Context, store *Store, nostr *NostrClient, notify func()) *GuestManager {
+func newGuestManager(ctx context.Context, store *Store, nostr *NostrClient, notify func(), activity *ActivityLog) *GuestManager {
 	return &GuestManager{
-		store:  store,
-		nostr:  nostr,
-		ctx:    ctx,
-		notify: notify,
-		conns:  map[string]*guestConn{},
+		store:    store,
+		nostr:    nostr,
+		ctx:      ctx,
+		notify:   notify,
+		activity: activity,
+		conns:    map[string]*guestConn{},
+		lastHost: map[string]string{},
 	}
 }
 
@@ -172,6 +179,7 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 		gc.mu.Lock()
 		gc.hostName = pc.Name
 		gc.hostModels = pc.Models
+		gc.hostPaused = pc.Paused
 		gc.tokenLimit = pc.TokenLimit
 		gc.tokensUsed = pc.TokensUsed
 		gc.lastSeen = time.Now().Unix()
@@ -236,10 +244,34 @@ func (g *GuestManager) RemoteModels() []RemoteModel {
 	return out
 }
 
-func (g *GuestManager) findHostForModel(model string) *guestConn {
+// hostsForModel returns the online hosts advertising the model, best first:
+//
+//  1. the host that last successfully served this model (sticky — keeps the
+//     provider-side prompt cache warm across an agentic session),
+//  2. then hosts with budget left, most remaining allotment first (unlimited
+//     outranks any finite budget),
+//  3. exhausted allotments last — still tried as a last resort so the host's
+//     clear "allotment exhausted" refusal reaches the client when nobody else
+//     can serve.
+//
+// Replaces the old first-match-in-map-order pick, which was effectively random
+// per request when several friends shared the same model.
+func (g *GuestManager) hostsForModel(model string) []*guestConn {
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	sticky := g.lastHost[model]
+	conns := make([]*guestConn, 0, len(g.conns))
 	for _, gc := range g.conns {
+		conns = append(conns, gc)
+	}
+	g.mu.Unlock()
+
+	type cand struct {
+		gc        *guestConn
+		bucket    int   // 0 sticky · 1 budget left · 2 exhausted
+		remaining int64 // -1 = unlimited
+	}
+	var cands []cand
+	for _, gc := range conns {
 		gc.mu.Lock()
 		online := time.Now().Unix()-gc.lastSeen < 60
 		has := false
@@ -249,17 +281,66 @@ func (g *GuestManager) findHostForModel(model string) *guestConn {
 				break
 			}
 		}
-		gc.mu.Unlock()
-		if online && has {
-			return gc
+		exhausted := gc.tokenLimit > 0 && gc.tokensUsed >= gc.tokenLimit
+		remaining := int64(-1)
+		if gc.tokenLimit > 0 {
+			remaining = gc.tokenLimit - gc.tokensUsed
 		}
+		id := gc.conn.ID
+		gc.mu.Unlock()
+		if !online || !has {
+			continue
+		}
+		bucket := 1
+		switch {
+		case exhausted:
+			bucket = 2
+		case id == sticky:
+			bucket = 0
+		}
+		cands = append(cands, cand{gc: gc, bucket: bucket, remaining: remaining})
 	}
-	return nil
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].bucket != cands[j].bucket {
+			return cands[i].bucket < cands[j].bucket
+		}
+		ri, rj := cands[i].remaining, cands[j].remaining
+		if ri == -1 {
+			return rj != -1 // unlimited first
+		}
+		if rj == -1 {
+			return false
+		}
+		return ri > rj // then most remaining
+	})
+	out := make([]*guestConn, len(cands))
+	for i, c := range cands {
+		out[i] = c.gc
+	}
+	return out
+}
+
+// rememberHost pins future requests for model to the connection that just
+// served it successfully.
+func (g *GuestManager) rememberHost(model, connID string) {
+	g.mu.Lock()
+	g.lastHost[model] = connID
+	g.mu.Unlock()
+}
+
+// connLabel is the friendly name for a connection (presence name, else label).
+func connLabel(gc *guestConn) string {
+	gc.mu.Lock()
+	defer gc.mu.Unlock()
+	if gc.hostName != "" {
+		return gc.hostName
+	}
+	return gc.conn.Label
 }
 
 // CanRoute reports whether some online host advertises the model.
 func (g *GuestManager) CanRoute(model string) bool {
-	return g.findHostForModel(model) != nil
+	return len(g.hostsForModel(model)) > 0
 }
 
 // OnlineFriends reports how many friend connections are online, and how many of
@@ -282,19 +363,75 @@ func (g *GuestManager) OnlineFriends() (online, sharing int) {
 	return
 }
 
-// RouteRequest proxies an OpenAI request to an online host over WebRTC, streaming
-// the response into w. Returns an error if no host can serve it / setup failed.
+// maxRouteAttempts bounds failover so a request can't crawl through a long
+// friend list (each connect attempt can take up to ~25s).
+const maxRouteAttempts = 3
+
+// RouteRequest proxies an OpenAI request to an online host over WebRTC,
+// streaming the response into w. When several friends share the model it tries
+// them best-first (see hostsForModel) and fails over to the next one as long
+// as nothing has been written to the client yet.
 func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path string, body []byte, w http.ResponseWriter) error {
-	gc := g.findHostForModel(model)
-	if gc == nil {
+	hosts := g.hostsForModel(model)
+	if len(hosts) == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, errBody("no online friend shares model "+model))
 		return errors.New("no online friend shares model " + model)
 	}
+	if len(hosts) > maxRouteAttempts {
+		hosts = hosts[:maxRouteAttempts]
+	}
+
+	var lastErr error
+	for i, gc := range hosts {
+		committed, err := g.routeVia(ctx, gc, model, method, path, body, w)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if committed || ctx.Err() != nil {
+			// Bytes already reached the client (or it went away) — too late to
+			// fail over; the error is only for the log/activity feed.
+			return err
+		}
+		if i+1 < len(hosts) {
+			log.Printf("guest: %s via %q failed before a response (%v) — trying next friend",
+				model, connLabel(gc), err)
+		}
+	}
+	writeJSON(w, http.StatusBadGateway,
+		errBody("could not reach "+model+" through any friend: "+lastErr.Error()))
+	return lastErr
+}
+
+// routeVia attempts the request through one host. committed reports whether
+// response bytes (status/body) were already written to w — once true the caller
+// must not retry elsewhere. Every attempt that targets a host lands in the
+// activity feed with its outcome; usage is only tallied once a response starts.
+func (g *GuestManager) routeVia(ctx context.Context, gc *guestConn, model, method, path string, body []byte, w http.ResponseWriter) (committed bool, retErr error) {
+	started := time.Now()
+	var tracker *usageTracker
+	defer func() {
+		var in, out int64
+		if tracker != nil {
+			in, out = tracker.Finish()
+			g.store.AddUsage(gc.conn.ID, 1, in, out)
+		}
+		status, msg := "ok", ""
+		if retErr != nil {
+			status, msg = "error", retErr.Error()
+		}
+		g.activity.Add(ActivityEntry{
+			TS: started.Unix(), Direction: "borrowed", Peer: connLabel(gc),
+			Model: model, Status: status, Error: msg,
+			InputTokens: in, OutputTokens: out,
+			DurationMs: time.Since(started).Milliseconds(),
+		})
+		g.notify()
+	}()
 
 	s, err := g.ensureSession(ctx, gc)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errBody("could not connect to friend: "+err.Error()))
-		return err
+		return false, errors.New("could not connect to friend: " + err.Error())
 	}
 
 	id := randomID(8)
@@ -321,40 +458,23 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 	}()
 
 	if err := g.sendRequest(s, id, method, path, body); err != nil {
-		writeJSON(w, http.StatusBadGateway, errBody("failed to send request to friend: "+err.Error()))
-		return err
+		return false, errors.New("failed to send request to friend: " + err.Error())
 	}
-
-	// Mirror the host's usage tally on the borrower's side (persisted). Only
-	// counted once a response actually starts, so failed routes don't inflate it.
-	var tracker *usageTracker
-	defer func() {
-		if tracker != nil {
-			in, out := tracker.Finish()
-			g.store.AddUsage(gc.conn.ID, 1, in, out)
-			g.notify()
-		}
-	}()
 
 	flusher, _ := w.(http.Flusher)
 	wroteHead := false
+	headStatus := 0
 	// Abort if the host goes silent (covers a wedged peer the client keeps open).
 	idle := time.NewTimer(120 * time.Second)
 	defer idle.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return wroteHead, ctx.Err()
 		case <-s.closed:
-			if !wroteHead {
-				writeJSON(w, http.StatusBadGateway, errBody("connection to friend closed before a response"))
-			}
-			return errors.New("connection closed")
+			return wroteHead, errors.New("connection to friend closed before a response")
 		case <-idle.C:
-			if !wroteHead {
-				writeJSON(w, http.StatusGatewayTimeout, errBody("friend did not respond in time"))
-			}
-			return errors.New("idle timeout")
+			return wroteHead, errors.New("friend did not respond in time")
 		case ev := <-pr.ch:
 			if !idle.Stop() {
 				select {
@@ -369,33 +489,39 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 					w.Header().Set("Content-Type", ev.ctype)
 				}
 				tracker = newUsageTracker(ev.ctype)
-				status := ev.status
-				if status == 0 {
-					status = http.StatusOK
+				headStatus = ev.status
+				if headStatus == 0 {
+					headStatus = http.StatusOK
 				}
-				w.WriteHeader(status)
+				w.WriteHeader(headStatus)
 				wroteHead = true
 			case "data":
 				if !wroteHead {
-					w.WriteHeader(http.StatusOK)
+					headStatus = http.StatusOK
+					w.WriteHeader(headStatus)
 					wroteHead = true
 				}
 				if tracker != nil {
 					tracker.Write(ev.data)
 				}
 				if _, err := w.Write(ev.data); err != nil {
-					return err
+					return true, err
 				}
 				if flusher != nil {
 					flusher.Flush()
 				}
 			case "end":
-				return nil
-			case "err":
-				if !wroteHead {
-					http.Error(w, ev.msg, http.StatusBadGateway)
+				if headStatus >= 400 {
+					// Streamed through, but the host's provider errored — don't
+					// pin stickiness to a failing host, and mark the attempt.
+					return true, errors.New("friend's provider returned HTTP " + strconv.Itoa(headStatus))
 				}
-				return errors.New(ev.msg)
+				g.rememberHost(model, gc.conn.ID)
+				return true, nil
+			case "err":
+				// Host refusal (paused / model not shared / allotment exhausted)
+				// or upstream failure. Before any bytes it's safe to fail over.
+				return wroteHead, errors.New(ev.msg)
 			}
 		}
 	}
@@ -592,6 +718,7 @@ func (s *guestSession) isClosed() bool {
 type ConnStatus struct {
 	Online       bool     `json:"online"`
 	Routing      bool     `json:"routing"`
+	Paused       bool     `json:"paused"` // host paused sharing (still online)
 	HostName     string   `json:"hostName"`
 	Models       []string `json:"models"`
 	TotalReqs    int      `json:"totalReqs"`
@@ -619,6 +746,7 @@ func (g *GuestManager) Status(connID string) ConnStatus {
 	defer gc.mu.Unlock()
 	st.Online = time.Now().Unix()-gc.lastSeen < 60
 	st.Routing = gc.active > 0
+	st.Paused = gc.hostPaused
 	st.HostName = gc.hostName
 	st.Models = append([]string(nil), gc.hostModels...)
 	st.TokenLimit = gc.tokenLimit

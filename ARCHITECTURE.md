@@ -73,11 +73,11 @@ only ever see ciphertext.
 Signaling and presence ride on public Nostr relays as kind **25050** events,
 tagged `["d", roomID]` and a `t` type. All content is sealed with `announceKey`.
 
-| `t`        | direction    | content (decrypted JSON)                                  |
-|------------|--------------|-----------------------------------------------------------|
-| `presence` | host → room  | `{role:"host", name, models:[...], ts}`                   |
-| `presence` | guest → room | `{role:"guest", peer, routing, ts}`                       |
-| `signal`   | both         | `{from, session, kind:"offer"\|"answer"\|"ice", payload}` |
+| `t`        | direction    | content (decrypted JSON)                                                    |
+|------------|--------------|-----------------------------------------------------------------------------|
+| `presence` | host → room  | `{role:"host", name, models:[...], paused?, tokenLimit?, tokensUsed?, ts}`  |
+| `presence` | guest → room | `{role:"guest", peer, routing, ts}`                                         |
+| `signal`   | both         | `{from, session, kind:"offer"\|"answer"\|"ice", payload}`                   |
 
 Once offer/answer/ICE complete, a direct WebRTC **DataChannel** (reliable,
 ordered, DTLS-encrypted) carries the traffic — Nostr is no longer used. Frames
@@ -109,6 +109,15 @@ The **host enforces** that `path` is allow-listed (`/v1/chat/completions`,
   an online friend that shares it, else `404`. Both carry a top-level `model`,
   so the routing logic is shared.
 
+When several friends share the same model, the guest ranks them (`guest.go
+hostsForModel`): **sticky** first (the host that last served this model — keeps
+the provider-side prompt cache warm), then most remaining allotment (unlimited
+outranks finite; presence carries `tokenLimit`/`tokensUsed`), with exhausted
+allotments last. If an attempt fails before any response bytes are written
+(host offline, refused, allotment exhausted), the request **fails over** to the
+next-ranked friend, up to 3 attempts; each attempt is logged to the activity
+feed.
+
 ## Control API (`control.go`) — Swift ⇆ router, `127.0.0.1:8799`
 
 | Method & path                  | purpose                                                  |
@@ -116,12 +125,19 @@ The **host enforces** that `path` is allow-listed (`/v1/chat/completions`,
 | `GET /api/status`              | router/upstream/Nostr health, identity, local models     |
 | `GET /api/grants`              | grants I issued + each guest's online/routing/usage state |
 | `POST /api/grants`             | create a grant `{label, providers, models}` → `code`     |
+| `PATCH /api/grants/{id}`       | partial update: `{tokenLimit?}` top-up and/or `{paused?}` |
 | `DELETE /api/grants/{id}`      | revoke a grant                                           |
 | `GET /api/connections`         | grants I hold + host online/models/routing/usage state   |
 | `POST /api/connections`        | redeem a code `{code, label}`                            |
 | `DELETE /api/connections/{id}` | drop a held connection                                  |
 | `GET /api/config` / `PUT`      | read/update identity name, ports, relays                 |
 | `GET /api/events`              | SSE stream of state changes (live UI updates)            |
+| `GET /api/activity`            | recent routed requests, both directions (live feed)      |
+
+A grant can be **paused**: the host keeps broadcasting presence (with
+`paused:true` and no models) but refuses requests, so the guest sees "paused"
+rather than "offline" and the code survives to be resumed — unlike revoke,
+which kills the code permanently.
 
 ## On-disk state (`~/.vibeshare/`)
 

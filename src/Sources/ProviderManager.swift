@@ -35,12 +35,42 @@ enum ProviderCatalog {
 final class ProviderManager: ObservableObject {
     @Published private(set) var connecting: Set<String> = []
     @Published private(set) var lastError: String?
+    /// Per-provider sign-in failures, keyed by provider key, so the row that
+    /// failed can explain itself instead of failing silently.
+    @Published private(set) var errors: [String: String] = [:]
 
     func isConnected(_ provider: ProviderInfo, localModels: [String]) -> Bool {
         let lower = localModels.map { $0.lowercased() }
         return lower.contains { id in
             provider.modelHints.contains { id.contains($0) }
         }
+    }
+
+    /// Where this provider's OAuth flow writes its output.
+    func loginLogURL(_ provider: ProviderInfo) -> URL {
+        AppPaths.stateDir.appendingPathComponent("login-\(provider.key).log")
+    }
+
+    /// The credential files cli-proxy-api stores for this provider — one JSON
+    /// per signed-in account, named "<key>-<account>.json" in its auth dir
+    /// (e.g. claude-user@example.com.json).
+    func authFiles(_ provider: ProviderInfo) -> [URL] {
+        let dir = AppPaths.providerAuthDir
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil)) ?? []
+        return items.filter {
+            $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix(provider.key + "-")
+        }
+    }
+
+    /// Disconnect = delete the locally stored sign-in(s). cli-proxy-api watches
+    /// its auth dir and hot-reloads, so the provider's models disappear from the
+    /// local list (and from anything shared with friends) within seconds.
+    func disconnect(_ provider: ProviderInfo) {
+        for f in authFiles(provider) {
+            try? FileManager.default.removeItem(at: f)
+        }
+        DispatchQueue.main.async { self.errors[provider.key] = nil }
     }
 
     /// Launches the provider's OAuth flow. cli-proxy-api opens the browser and
@@ -54,28 +84,38 @@ final class ProviderManager: ObservableObject {
         }
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.path)
 
-        DispatchQueue.main.async { self.connecting.insert(provider.key) }
+        DispatchQueue.main.async {
+            self.connecting.insert(provider.key)
+            self.errors[provider.key] = nil
+        }
 
         let proc = Process()
         proc.executableURL = bin
         proc.arguments = [flag, "-config", AppPaths.providerConfigPath().path]
-        let logURL = AppPaths.stateDir.appendingPathComponent("login-\(provider.key).log")
+        let logURL = loginLogURL(provider)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let handle = try? FileHandle(forWritingTo: logURL)
         if let handle {
             proc.standardOutput = handle
             proc.standardError = handle
         }
-        proc.terminationHandler = { [weak self] _ in
+        proc.terminationHandler = { [weak self] p in
             try? handle?.close()
-            DispatchQueue.main.async { self?.connecting.remove(provider.key) }
+            let failed = p.terminationStatus != 0
+            DispatchQueue.main.async {
+                self?.connecting.remove(provider.key)
+                if failed {
+                    self?.errors[provider.key] =
+                        "Sign-in didn't finish (exit \(p.terminationStatus)) — open the log for details."
+                }
+            }
         }
         do {
             try proc.run()
         } catch {
             DispatchQueue.main.async {
                 self.connecting.remove(provider.key)
-                self.lastError = "Login failed to start: \(error.localizedDescription)"
+                self.errors[provider.key] = "Login failed to start: \(error.localizedDescription)"
             }
         }
     }

@@ -1,14 +1,17 @@
 import Foundation
 import SwiftUI
 import AppKit
+import ServiceManagement
 
 /// AppController is the single source of truth the SwiftUI views observe. It
-/// boots the child processes and polls the router's control API.
+/// boots the child processes, subscribes to the router's SSE event stream for
+/// instant updates, and polls the control API as a slow fallback.
 @MainActor
 final class AppController: ObservableObject {
     @Published var status: RouterStatus?
     @Published var grants: [GrantView] = []
     @Published var connections: [ConnectionView] = []
+    @Published var activity: [ActivityEntry] = []
     @Published var softError: String?
     @Published var lastUpdated: Date?
 
@@ -30,19 +33,54 @@ final class AppController: ObservableObject {
     static let shared = AppController()
 
     private var pollTask: Task<Void, Never>?
+    private var eventTask: Task<Void, Never>?
+    private var eventRefreshPending = false
 
     func start() {
         processes.startAll()
         startPolling()
+        startEventStream()
     }
 
+    /// Slow fallback poll. The SSE stream delivers the interesting transitions
+    /// instantly; this catches anything that doesn't notify (relay health,
+    /// upstream reachability) and recovers if the stream is down.
     private func startPolling() {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    /// Live updates: re-subscribe to GET /api/events forever (the router may be
+    /// restarting), refreshing on every pushed change.
+    private func startEventStream() {
+        eventTask?.cancel()
+        eventTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let client = self?.client {
+                    try? await client.subscribeEvents {
+                        Task { @MainActor in AppController.shared.scheduleEventRefresh() }
+                    }
+                }
+                // Stream ended (router down/restarting) — retry shortly.
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
+        }
+    }
+
+    /// Coalesce event bursts (every routed chunk of work can notify) into one
+    /// refresh ~0.15s later.
+    private func scheduleEventRefresh() {
+        guard !eventRefreshPending else { return }
+        eventRefreshPending = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            self?.eventRefreshPending = false
+            await self?.refresh()
         }
     }
 
@@ -51,10 +89,16 @@ final class AppController: ObservableObject {
             async let s = client.status()
             async let g = client.grants()
             async let c = client.connections()
-            let (st, gr, co) = try await (s, g, c)
+            async let a = client.activity()
+            let (st, gr, co, ac) = try await (s, g, c, a)
+            // Notify on interesting transitions before overwriting the snapshot.
+            NotificationManager.shared.diff(
+                oldGrants: grants, newGrants: gr,
+                oldConnections: connections, newConnections: co)
             status = st
             grants = gr
             connections = co
+            activity = ac
             softError = nil
             lastUpdated = Date()
         } catch {
@@ -89,6 +133,16 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// Temporarily stop (or resume) serving a friend without killing their code.
+    func setGrantPaused(_ id: String, paused: Bool) async {
+        do {
+            try await client.setGrantPaused(id: id, paused: paused)
+            await refresh()
+        } catch {
+            softError = error.localizedDescription
+        }
+    }
+
     func revokeGrant(_ id: String) async {
         try? await client.revokeGrant(id: id)
         await refresh()
@@ -115,11 +169,43 @@ final class AppController: ObservableObject {
         providers.connect(provider)
     }
 
-    func setIdentityName(_ name: String) async {
-        guard var cfg = try? await client.config() else { return }
+    /// Disconnect a provider after confirmation (it deletes the stored sign-in,
+    /// and getting back requires the browser OAuth dance).
+    func disconnectProvider(_ provider: ProviderInfo) {
+        let files = providers.authFiles(provider)
+        let alert = NSAlert()
+        NSApp.activate(ignoringOtherApps: true)
+        guard !files.isEmpty else {
+            // "Connected" is inferred from the model list, so a provider can look
+            // connected via another account's models (e.g. Antigravity ⇄ Gemini).
+            alert.messageText = "No stored sign-in for \(provider.name)"
+            alert.informativeText = "Its models are likely served by another connected provider's account, so there is nothing to disconnect here."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        alert.alertStyle = .warning
+        alert.messageText = "Disconnect \(provider.name)?"
+        let accounts = files.count == 1 ? "the locally stored sign-in" : "\(files.count) locally stored sign-ins"
+        alert.informativeText = "This removes \(accounts). Friends you share \(provider.name) models with lose them until you reconnect. Your subscription itself is untouched."
+        alert.addButton(withTitle: "Disconnect")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        providers.disconnect(provider)
+        Task { await refresh() }
+    }
+
+    func setIdentityName(_ name: String) async -> Bool {
+        guard var cfg = try? await client.config() else { return false }
         cfg.identityName = name
-        try? await client.updateConfig(cfg)
+        do {
+            try await client.updateConfig(cfg)
+        } catch {
+            softError = error.localizedDescription
+            return false
+        }
         await refresh()
+        return true
     }
 
     func setSharingEnabled(_ enabled: Bool) async {
@@ -129,13 +215,60 @@ final class AppController: ObservableObject {
         await refresh()
     }
 
+    /// Replace the signaling relay set. Relays are read at router start, so the
+    /// router is restarted afterwards (the UI shows it reconnecting).
+    func setRelays(_ relays: [String]) async -> Bool {
+        guard var cfg = try? await client.config() else { return false }
+        cfg.nostrRelays = relays
+        do {
+            try await client.updateConfig(cfg)
+        } catch {
+            softError = error.localizedDescription
+            return false
+        }
+        processes.restartRouter()
+        return true
+    }
+
+    // MARK: Launch at login
+
+    /// SMAppService only works from a real .app bundle (not `swift build` runs).
+    nonisolated static var launchAtLoginAvailable: Bool {
+        Bundle.main.bundlePath.hasSuffix(".app")
+    }
+
+    var launchAtLogin: Bool {
+        guard Self.launchAtLoginAvailable else { return false }
+        return SMAppService.mainApp.status == .enabled
+    }
+
+    func setLaunchAtLogin(_ on: Bool) {
+        guard Self.launchAtLoginAvailable else { return }
+        do {
+            if on {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            softError = "Launch at login: \(error.localizedDescription)"
+        }
+        objectWillChange.send()
+    }
+
+    // MARK: Misc
+
+    var endpointBase: String {
+        "http://127.0.0.1:\(status?.frontPort ?? 8788)"
+    }
+
     var endpointURL: String {
-        "http://127.0.0.1:\(status?.frontPort ?? 8788)/v1"
+        endpointBase + "/v1"
     }
 
     func copyEndpoint() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(endpointURL, forType: .string)
+        copyToPasteboard(endpointURL)
+        markToolSetupSeen()
     }
 
     func copyToPasteboard(_ text: String) {
@@ -143,8 +276,42 @@ final class AppController: ObservableObject {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    /// Getting-started step 2 ("point a tool at the endpoint") is checked once
+    /// the user copies the endpoint or any setup snippet.
+    static let toolSetupSeenKey = "onboarding.toolSetupSeen"
+    func markToolSetupSeen() {
+        UserDefaults.standard.set(true, forKey: Self.toolSetupSeenKey)
+        objectWillChange.send()
+    }
+    var toolSetupSeen: Bool {
+        UserDefaults.standard.bool(forKey: Self.toolSetupSeenKey)
+    }
+
     func openLogsFolder() {
         NSWorkspace.shared.open(AppPaths.stateDir)
+    }
+
+    func openLogFile(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Quit, but warn first when friends are connected (quitting cuts them off).
+    func requestQuit() {
+        let affected = grants.filter { !$0.revoked && ($0.online || $0.routing) }
+        if !affected.isEmpty {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Quit VibeShare?"
+            let names = affected.map(\.label).joined(separator: ", ")
+            alert.informativeText = affected.count == 1
+                ? "\(names) is connected right now and will lose access to your models while VibeShare is closed."
+                : "\(names) are connected right now and will lose access to your models while VibeShare is closed."
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        quit()
     }
 
     func quit() {

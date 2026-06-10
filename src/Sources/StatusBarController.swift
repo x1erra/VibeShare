@@ -50,6 +50,11 @@ final class StatusBarController {
     // MARK: Routing dot
 
     private static let dotSize: CGFloat = 7
+    /// Minimum time the dot stays visible, so a short completion still blinks.
+    private static let dotLinger: TimeInterval = 1.5
+
+    private var hideDotWork: DispatchWorkItem?
+    private var dotShownAt = Date.distantPast
 
     private func positionDot() {
         guard let button = statusItem.button else { return }
@@ -59,11 +64,27 @@ final class StatusBarController {
         dot.frame = NSRect(x: b.maxX - d - 0.5, y: b.maxY - d - 1.5, width: d, height: d)
     }
 
-    /// Show a solid dot while any request is in flight; hide it when idle.
+    /// Show a solid dot while any request is in flight; hide it (after a short
+    /// linger so it's actually perceivable) when idle.
     private func routingChanged() {
         let routing = AppController.shared.isRouting
-        if routing { positionDot() }
-        dot.isHidden = !routing
+        if routing {
+            hideDotWork?.cancel()
+            hideDotWork = nil
+            positionDot()
+            if dot.isHidden { dotShownAt = Date() }
+            dot.isHidden = false
+        } else if !dot.isHidden, hideDotWork == nil {
+            let elapsed = Date().timeIntervalSince(dotShownAt)
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.hideDotWork = nil
+                if !AppController.shared.isRouting { self.dot.isHidden = true }
+            }
+            hideDotWork = work
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + max(0, Self.dotLinger - elapsed), execute: work)
+        }
     }
 
     // MARK: Popover

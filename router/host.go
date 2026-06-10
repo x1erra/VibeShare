@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,7 @@ type HostManager struct {
 	upstream *Upstream
 	ctx      context.Context
 	notify   func() // called when host-visible state changes (for SSE)
+	activity *ActivityLog
 
 	mu     sync.Mutex
 	grants map[string]*hostGrant
@@ -112,13 +114,14 @@ func (hs *hostSession) isAuthed() bool {
 	return hs.authed
 }
 
-func newHostManager(ctx context.Context, store *Store, nostr *NostrClient, upstream *Upstream, notify func()) *HostManager {
+func newHostManager(ctx context.Context, store *Store, nostr *NostrClient, upstream *Upstream, notify func(), activity *ActivityLog) *HostManager {
 	return &HostManager{
 		store:    store,
 		nostr:    nostr,
 		upstream: upstream,
 		ctx:      ctx,
 		notify:   notify,
+		activity: activity,
 		grants:   map[string]*hostGrant{},
 	}
 }
@@ -147,6 +150,22 @@ func (h *HostManager) Reconcile() {
 	}
 }
 
+// RefreshGrant recomputes a grant's shared models and re-broadcasts presence
+// immediately (e.g. after pause/resume), instead of waiting for the next tick.
+func (h *HostManager) RefreshGrant(id string) {
+	h.mu.Lock()
+	hg, ok := h.grants[id]
+	h.mu.Unlock()
+	if !ok {
+		return
+	}
+	go func() {
+		h.recomputeModels(hg) // blocking upstream call — never under h.mu
+		h.sendPresence(hg)
+		h.notify()
+	}()
+}
+
 // caller holds h.mu
 func (h *HostManager) startGrant(g Grant) {
 	keys, err := deriveGrantKeys(g.Code)
@@ -173,11 +192,17 @@ func (h *HostManager) startGrant(g Grant) {
 func (h *HostManager) recomputeModels(hg *hostGrant) {
 	upstreamModels, _ := h.upstream.ListModels()
 	models, allowAll := computeSharedModels(hg.grant, upstreamModels)
+	paused := h.store.GrantPaused(hg.grant.ID)
+	if paused {
+		// Paused: advertise nothing so the guest's /v1/models drops these, but
+		// keep presence flowing so the guest sees "paused" rather than offline.
+		models, allowAll = nil, false
+	}
 	hg.mu.Lock()
 	hg.allowAll = allowAll
 	hg.models = models
 	hg.allowedModels = models
-	empty := len(models) == 0
+	empty := len(models) == 0 && !paused
 	transition := empty != hg.warnedEmpty
 	hg.warnedEmpty = empty
 	label := hg.grant.Label
@@ -271,6 +296,7 @@ func (h *HostManager) sendPresence(hg *hostGrant) {
 		Role:       "host",
 		Name:       h.store.Config().IdentityName,
 		Models:     models,
+		Paused:     h.store.GrantPaused(hg.grant.ID),
 		TokenLimit: h.store.GrantLimit(hg.grant.ID),
 		TokensUsed: u.InputTokens + u.OutputTokens,
 		TS:         time.Now().Unix(),
@@ -469,19 +495,33 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	if dc == nil {
 		return
 	}
-	if !allowedProxyPaths[path] {
-		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "path not allowed"})
-		return
-	}
-
-	// Every allowed path is a completion-style POST carrying a model; enforce
-	// the grant's allow-list before touching the upstream.
+	// Every allowed path is a completion-style POST carrying a model; parse it
+	// up front so refusals can be recorded in the activity feed too.
 	var probe struct {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &probe)
+	started := time.Now()
+	refuse := func(msg string) {
+		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: msg})
+		h.activity.Add(ActivityEntry{
+			TS: started.Unix(), Direction: "hosted", Peer: hg.grant.Label,
+			Model: probe.Model, Status: "error", Error: msg,
+		})
+	}
+
+	if !allowedProxyPaths[path] {
+		refuse("path not allowed")
+		return
+	}
+
+	// Enforce the grant's allow-list before touching the upstream.
+	if h.store.GrantPaused(hg.grant.ID) {
+		refuse("sharing is paused — ask your friend to resume it in VibeShare")
+		return
+	}
 	if !h.grantAllowsModel(hg, probe.Model) {
-		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "model not shared: " + probe.Model})
+		refuse("model not shared: " + probe.Model)
 		return
 	}
 
@@ -492,7 +532,7 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	if limit := h.store.GrantLimit(hg.grant.ID); limit > 0 {
 		u := h.store.Usage(hg.grant.ID)
 		if u.InputTokens+u.OutputTokens >= limit {
-			_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "token allotment exhausted — ask your friend to top it up"})
+			refuse("token allotment exhausted — ask your friend to top it up")
 			return
 		}
 	}
@@ -517,17 +557,32 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 
 	resp, err := h.upstream.do(ctx, method, path, body)
 	if err != nil {
-		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "upstream error: " + err.Error()})
+		refuse("upstream error: " + err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	// The request reached the provider — count it and tally its tokens (parsed
 	// from the response as it streams past), persisted so it survives restarts.
+	// The same numbers feed the activity entry for the live feed.
 	tracker := newUsageTracker(resp.Header.Get("Content-Type"))
+	streamErr := ""
 	defer func() {
 		in, out := tracker.Finish()
 		h.store.AddUsage(hg.grant.ID, 1, in, out)
+		status, errMsg := "ok", streamErr
+		if errMsg == "" && resp.StatusCode >= 400 {
+			errMsg = "provider returned HTTP " + strconv.Itoa(resp.StatusCode)
+		}
+		if errMsg != "" {
+			status = "error"
+		}
+		h.activity.Add(ActivityEntry{
+			TS: started.Unix(), Direction: "hosted", Peer: hg.grant.Label,
+			Model: probe.Model, Status: status, Error: errMsg,
+			InputTokens: in, OutputTokens: out,
+			DurationMs: time.Since(started).Milliseconds(),
+		})
 		h.notify()
 	}()
 
@@ -552,6 +607,7 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 		if readErr != nil {
 			if readErr != io.EOF {
 				_ = sendFrame(dc, frame{T: "err", ID: id, Msg: readErr.Error()})
+				streamErr = readErr.Error()
 				return
 			}
 			break

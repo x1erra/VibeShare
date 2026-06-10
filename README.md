@@ -72,22 +72,33 @@ ad-hoc signed (fine locally; right-click → Open the first time).
 
 1. Click the menu-bar icon → **Providers** → **Connect** your subscriptions
    (opens a browser OAuth flow; credentials are stored locally in
-   `~/.cli-proxy-api`).
+   `~/.cli-proxy-api`). **Disconnect** deletes that stored sign-in again —
+   reconnect whenever you like.
 2. Point any OpenAI-compatible tool at `http://127.0.0.1:8788/v1` (no API key
    needed locally).
 
 ### Share with a friend
 
-- **Share** tab → **New** → name it, pick which providers to share → **Create
+- **Share** tab → **New** → name it, pick what to share (everything, specific
+  providers, or specific models) and an optional token allotment → **Create
   code**. Send them the `VS-…` code.
 - They open VibeShare → **Borrow** → **Enter code**. Within seconds you appear
   **online** in their list, and your shared models show up in their
   `/v1/models`.
+- Need your quota back for a while? **Pause** a friend instead of revoking —
+  the code stays valid and you can resume any time. **Revoke** kills the code
+  permanently.
+- The **Activity** tab shows every request routed through your shares (both
+  directions) as it happens.
 
 ### Borrow from a friend
 
 - **Borrow** tab → **Enter code** with the code they gave you. Their models now
   resolve through your local endpoint automatically.
+- If several friends share the same model, requests stick to the friend who
+  served it last (keeps their provider-side prompt cache warm), prefer whoever
+  has the most allotment left, and automatically fail over to the next friend
+  if one is unreachable or out of budget.
 
 ### Use with Claude Code
 
@@ -133,9 +144,10 @@ verified end-to-end). Rough edges / planned next steps:
 - Provider connection currently relies on cli-proxy-api's OAuth flows; the
   "connected" indicator is inferred from the live model list.
 - WebRTC uses public STUN only — very restrictive NATs may need a TURN server.
-- Grant codes are bearer credentials; revoking a grant stops the host serving
-  it, which ends access.
-- One shared relay set; relay changes need a router restart.
+- Grant codes are bearer credentials; pausing a grant suspends access (the code
+  survives), revoking ends it permanently.
+- Relays can be edited in Settings; saving restarts the router automatically
+  (relays only apply at router start).
 
 ## Credits
 
