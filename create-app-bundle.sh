@@ -44,6 +44,7 @@ fi
 
 # 2. Build the Go router into Resources.
 echo -e "${BLUE}Building vibeshare-router (Go)...${NC}"
+rm -f "$RESOURCES_DIR/vibeshare-router" # go build won't overwrite a fat (universal) binary
 if [ "$UNIVERSAL" = "1" ]; then
   TMP_GO="$(mktemp -d)"
   ( cd "$ROUTER_DIR" \

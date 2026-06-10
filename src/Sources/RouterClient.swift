@@ -30,6 +30,23 @@ struct RouterClient {
     func config() async throws -> RouterConfig {
         try await get("/api/config")
     }
+    func activity(limit: Int = 50) async throws -> [ActivityEntry] {
+        try await get("/api/activity?limit=\(limit)")
+    }
+
+    /// Long-lived SSE subscription to /api/events. Calls `onEvent` for every
+    /// state-change line the router pushes; returns when the stream ends.
+    func subscribeEvents(onEvent: @escaping @Sendable () -> Void) async throws {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(controlPort)/api/events")!)
+        req.timeoutInterval = 3600
+        let (bytes, response) = try await URLSession.shared.bytes(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw ClientError.http((response as? HTTPURLResponse)?.statusCode ?? 0, "events stream")
+        }
+        for try await line in bytes.lines {
+            if line.hasPrefix("data:") { onEvent() }
+        }
+    }
 
     // MARK: Writes
 
@@ -41,6 +58,10 @@ struct RouterClient {
     }
     func updateGrantLimit(id: String, tokenLimit: Int) async throws {
         let data = try JSONSerialization.data(withJSONObject: ["tokenLimit": tokenLimit])
+        _ = try await raw("/api/grants/\(id)", method: "PATCH", body: data)
+    }
+    func setGrantPaused(id: String, paused: Bool) async throws {
+        let data = try JSONSerialization.data(withJSONObject: ["paused": paused])
         _ = try await raw("/api/grants/\(id)", method: "PATCH", body: data)
     }
     func revokeGrant(id: String) async throws {
@@ -82,7 +103,11 @@ struct RouterClient {
     }
 
     private func raw(_ path: String, method: String, body: Data?) async throws -> Data {
-        var req = URLRequest(url: base.appendingPathComponent(path))
+        // Relative resolution (not appendingPathComponent) so query strings work.
+        guard let url = URL(string: path, relativeTo: base) else {
+            throw ClientError.http(0, "bad path \(path)")
+        }
+        var req = URLRequest(url: url)
         req.httpMethod = method
         req.timeoutInterval = 10
         if let body {

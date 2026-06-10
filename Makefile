@@ -12,6 +12,7 @@ fetch-provider: ## Download the cli-proxy-api provider binary into Resources
 
 router: ## Build the Go router into Swift Resources
 	@echo "🔨 Building vibeshare-router..."
+	@rm -f src/Sources/Resources/vibeshare-router # go build won't overwrite a fat (universal) binary
 	@cd router && $(GO) build -o ../src/Sources/Resources/vibeshare-router .
 	@echo "✅ src/Sources/Resources/vibeshare-router"
 

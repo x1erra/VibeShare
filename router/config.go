@@ -58,6 +58,7 @@ type Grant struct {
 	TokenLimit int64    `json:"tokenLimit"` // 0 = unlimited; max total (input+output) tokens this friend may use
 	CreatedAt  int64    `json:"createdAt"`
 	Revoked    bool     `json:"revoked"`
+	Paused     bool     `json:"paused"` // temporarily stop serving without killing the code
 }
 
 // Connection is a share I hold (guest role).
@@ -203,6 +204,38 @@ func (s *Store) GrantLimit(id string) int64 {
 		}
 	}
 	return 0
+}
+
+// GrantPaused reports whether a grant is paused. Read live from the store so
+// pause/resume takes effect on the next request without restarting the worker.
+func (s *Store) GrantPaused(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, g := range s.grants {
+		if g.ID == id {
+			return g.Paused
+		}
+	}
+	return false
+}
+
+// SetGrantPaused pauses or resumes a grant (host keeps the code alive but stops
+// serving requests while paused) and persists it.
+func (s *Store) SetGrantPaused(id string, paused bool) error {
+	s.mu.Lock()
+	found := false
+	for i := range s.grants {
+		if s.grants[i].ID == id {
+			s.grants[i].Paused = paused
+			found = true
+		}
+	}
+	grants := append([]Grant(nil), s.grants...)
+	s.mu.Unlock()
+	if !found {
+		return errGrantNotFound
+	}
+	return saveJSON(filepath.Join(s.dir, "grants.json"), grants)
 }
 
 // SetGrantLimit updates a grant's token allotment (host can raise/lower or

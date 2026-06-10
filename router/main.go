@@ -80,12 +80,13 @@ func main() {
 
 	bus := newEventBus()
 	upstream := newUpstream(store.Config)
+	activity := newActivityLog(bus.Notify)
 
 	nostr := newNostrClient(cfg.NostrRelays)
 	nostr.Start(ctx)
 
-	hostMgr := newHostManager(ctx, store, nostr, upstream, bus.Notify)
-	guestMgr := newGuestManager(ctx, store, nostr, bus.Notify)
+	hostMgr := newHostManager(ctx, store, nostr, upstream, bus.Notify, activity)
+	guestMgr := newGuestManager(ctx, store, nostr, bus.Notify, activity)
 	hostMgr.Reconcile()
 	guestMgr.Reconcile()
 
@@ -97,6 +98,7 @@ func main() {
 		upstream: upstream,
 		nostr:    nostr,
 		bus:      bus,
+		activity: activity,
 	}
 
 	frontSrv := startHTTP(ctx, cfg.FrontPort, front.handler())

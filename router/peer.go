@@ -39,6 +39,7 @@ type presenceContent struct {
 	Models     []string `json:"models,omitempty"`     // models the host is sharing via this grant
 	Peer       string   `json:"peer,omitempty"`       // guest's ephemeral session id
 	Routing    bool     `json:"routing,omitempty"`
+	Paused     bool     `json:"paused,omitempty"`     // host→guest: sharing temporarily paused (still online)
 	TokenLimit int64    `json:"tokenLimit,omitempty"` // host→guest: this friend's allotment (0 = unlimited)
 	TokensUsed int64    `json:"tokensUsed,omitempty"` // host→guest: authoritative tokens consumed so far
 	TS         int64    `json:"ts"`

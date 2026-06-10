@@ -61,6 +61,39 @@ final class ProcessManager: ObservableObject {
         }
     }
 
+    /// Full engine restart (e.g. after a relay/port config change, or from the
+    /// health banner). Async so the UI never blocks on the 3s kill deadline.
+    func restartAll() {
+        queue.async {
+            self.stopping = true
+            self.kill(self.routerProcess); self.routerProcess = nil
+            try? self.routerLog?.close(); self.routerLog = nil
+            self.kill(self.providerProcess); self.providerProcess = nil
+            try? self.providerLog?.close(); self.providerLog = nil
+            DispatchQueue.main.async {
+                self.routerRunning = false
+                self.providerRunning = false
+                self.lastError = nil
+            }
+            self.stopping = false
+            self.startProvider()
+            Thread.sleep(forTimeInterval: 0.6)
+            self.startRouter()
+        }
+    }
+
+    /// Restart just the router (relay changes only apply on router start).
+    func restartRouter() {
+        queue.async {
+            self.stopping = true
+            self.kill(self.routerProcess); self.routerProcess = nil
+            try? self.routerLog?.close(); self.routerLog = nil
+            DispatchQueue.main.async { self.routerRunning = false }
+            self.stopping = false
+            self.startRouter()
+        }
+    }
+
     /// SIGTERM, then SIGKILL if the process refuses to exit within 3s, so quit
     /// can never hang on a wedged child.
     private func kill(_ proc: Process?) {

@@ -37,6 +37,7 @@ struct GrantView: Codable, Identifiable {
     var models: [String]
     var createdAt: Int64
     var revoked: Bool
+    var paused: Bool
     var online: Bool
     var routing: Bool
     var advertisedModels: [String]
@@ -64,6 +65,7 @@ struct GrantView: Codable, Identifiable {
         models = try c.decodeIfPresent([String].self, forKey: .models) ?? []
         createdAt = try c.decodeIfPresent(Int64.self, forKey: .createdAt) ?? 0
         revoked = try c.decodeIfPresent(Bool.self, forKey: .revoked) ?? false
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         online = try c.decodeIfPresent(Bool.self, forKey: .online) ?? false
         routing = try c.decodeIfPresent(Bool.self, forKey: .routing) ?? false
         advertisedModels = try c.decodeIfPresent([String].self, forKey: .advertisedModels) ?? []
@@ -80,6 +82,7 @@ struct ConnectionView: Codable, Identifiable {
     var redeemedAt: Int64
     var online: Bool
     var routing: Bool
+    var paused: Bool // host paused sharing (still online)
     var hostName: String
     var models: [String]
     var totalReqs: Int
@@ -104,6 +107,7 @@ struct ConnectionView: Codable, Identifiable {
         redeemedAt = try c.decodeIfPresent(Int64.self, forKey: .redeemedAt) ?? 0
         online = try c.decodeIfPresent(Bool.self, forKey: .online) ?? false
         routing = try c.decodeIfPresent(Bool.self, forKey: .routing) ?? false
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         hostName = try c.decodeIfPresent(String.self, forKey: .hostName) ?? ""
         models = try c.decodeIfPresent([String].self, forKey: .models) ?? []
         totalReqs = try c.decodeIfPresent(Int.self, forKey: .totalReqs) ?? 0
@@ -122,4 +126,37 @@ struct RouterConfig: Codable {
     var nostrRelays: [String]
     var identityName: String
     var enableSharing: Bool
+}
+
+/// One routed request in the live activity feed (mirrors the router's
+/// ActivityEntry; in-memory on the router, so it resets with it).
+struct ActivityEntry: Codable, Identifiable {
+    var id: Int64
+    var ts: Int64
+    var direction: String // "hosted" | "borrowed"
+    var peer: String
+    var model: String
+    var status: String // "ok" | "error"
+    var error: String
+    var inputTokens: Int
+    var outputTokens: Int
+    var durationMs: Int64
+
+    var hosted: Bool { direction == "hosted" }
+    var ok: Bool { status == "ok" }
+    var date: Date { Date(timeIntervalSince1970: TimeInterval(ts)) }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int64.self, forKey: .id)
+        ts = try c.decodeIfPresent(Int64.self, forKey: .ts) ?? 0
+        direction = try c.decodeIfPresent(String.self, forKey: .direction) ?? ""
+        peer = try c.decodeIfPresent(String.self, forKey: .peer) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
+        status = try c.decodeIfPresent(String.self, forKey: .status) ?? ""
+        error = try c.decodeIfPresent(String.self, forKey: .error) ?? ""
+        inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
+        outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
+        durationMs = try c.decodeIfPresent(Int64.self, forKey: .durationMs) ?? 0
+    }
 }
