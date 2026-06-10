@@ -67,14 +67,25 @@ final class AppController: ObservableObject {
     // MARK: Actions
 
     @discardableResult
-    func createGrant(label: String, providers: [String], models: [String]) async -> GrantView? {
+    func createGrant(label: String, providers: [String], models: [String], tokenLimit: Int) async -> GrantView? {
         do {
-            let g = try await client.createGrant(label: label, providers: providers, models: models)
+            let g = try await client.createGrant(
+                label: label, providers: providers, models: models, tokenLimit: tokenLimit)
             await refresh()
             return g
         } catch {
             softError = error.localizedDescription
             return nil
+        }
+    }
+
+    /// Adjust or top-up a friend's token allotment after the code was issued.
+    func setGrantLimit(_ id: String, tokenLimit: Int) async {
+        do {
+            try await client.updateGrantLimit(id: id, tokenLimit: tokenLimit)
+            await refresh()
+        } catch {
+            softError = error.localizedDescription
         }
     }
 

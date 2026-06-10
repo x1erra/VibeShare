@@ -182,6 +182,8 @@ struct ShareTab: View {
                     .controlSize(.small)
             }
 
+            allotmentSummary
+
             if controller.grants.filter({ !$0.revoked }).isEmpty {
                 EmptyHint(icon: "square.and.arrow.up",
                           text: "Create a code and send it to a friend to share usage.")
@@ -192,11 +194,31 @@ struct ShareTab: View {
             }
         }
     }
+
+    /// Host-side at-a-glance: how much you've committed across capped friends and
+    /// how much of that they've used.
+    @ViewBuilder
+    private var allotmentSummary: some View {
+        let limited = controller.grants.filter { !$0.revoked && $0.hasLimit }
+        if !limited.isEmpty {
+            let allotted = limited.reduce(0) { $0 + $1.tokenLimit }
+            let used = limited.reduce(0) { $0 + $1.totalTokens }
+            HStack(spacing: 6) {
+                Image(systemName: "chart.bar.fill").font(.caption2)
+                Text("Allotted \(compact(allotted)) tokens to \(limited.count) friend\(limited.count == 1 ? "" : "s") · \(compact(used)) used")
+                    .font(.caption2)
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
 }
 
 struct GrantRow: View {
     @EnvironmentObject var controller: AppController
     let grant: GrantView
+    @State private var editingLimit = false
+    @State private var limitDraft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -228,9 +250,62 @@ struct GrantRow: View {
                 } label: { Text("Revoke").font(.caption2) }
                     .buttonStyle(.borderless)
             }
+            allotmentRow
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+    }
+
+    @ViewBuilder
+    private var allotmentRow: some View {
+        if editingLimit {
+            HStack(spacing: 6) {
+                Image(systemName: "chart.bar.fill").font(.caption2).foregroundStyle(.secondary)
+                TextField("Unlimited", text: $limitDraft)
+                    .textFieldStyle(.roundedBorder).frame(width: 64).controlSize(.small)
+                Text("M tokens").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button("Save") {
+                    let newLimit = tokensFromMillions(limitDraft)
+                    editingLimit = false
+                    Task { await controller.setGrantLimit(grant.id, tokenLimit: newLimit) }
+                }.font(.caption2).buttonStyle(.borderless)
+                Button("Cancel") { editingLimit = false }
+                    .font(.caption2).buttonStyle(.borderless)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chart.bar.fill").font(.caption2).foregroundStyle(allotmentColor)
+                    Text(allotmentText).font(.caption2).foregroundStyle(allotmentColor)
+                    Spacer()
+                    Button {
+                        limitDraft = grant.hasLimit ? millionsString(grant.tokenLimit) : ""
+                        editingLimit = true
+                    } label: {
+                        Image(systemName: "pencil").font(.caption2)
+                    }.buttonStyle(.borderless).help("Set token allotment")
+                }
+                if grant.hasLimit {
+                    ProgressView(value: min(Double(grant.totalTokens), Double(grant.tokenLimit)),
+                                 total: Double(grant.tokenLimit))
+                        .progressViewStyle(.linear).tint(allotmentColor)
+                }
+            }
+        }
+    }
+
+    private var allotmentText: String {
+        guard grant.hasLimit else { return "Unlimited tokens" }
+        if grant.remaining == 0 { return "Allotment used up (\(compact(grant.tokenLimit)) tok)" }
+        return "\(compact(grant.remaining)) of \(compact(grant.tokenLimit)) tokens left"
+    }
+
+    private var allotmentColor: Color {
+        guard grant.hasLimit else { return .secondary }
+        if grant.remaining == 0 { return .red }
+        if Double(grant.remaining) < Double(grant.tokenLimit) * 0.1 { return .orange }
+        return .secondary
     }
 
     private var grantScope: String {
@@ -302,6 +377,19 @@ struct ConnectionRow: View {
                 Text(connection.online ? "Waiting for shared model list…" : "Friend is offline")
                     .font(.caption2).foregroundStyle(.secondary)
             }
+            if connection.hasLimit {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chart.bar.fill").font(.caption2)
+                        Text(allotmentText).font(.caption2)
+                        Spacer()
+                    }
+                    .foregroundStyle(allotmentColor)
+                    ProgressView(value: min(Double(connection.tokensUsed), Double(connection.tokenLimit)),
+                                 total: Double(connection.tokenLimit))
+                        .progressViewStyle(.linear).tint(allotmentColor)
+                }
+            }
             HStack {
                 Text("\(connection.models.count) models").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
@@ -316,6 +404,19 @@ struct ConnectionRow: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+    }
+
+    private var allotmentText: String {
+        if connection.remaining == 0 {
+            return "Allotment used up (\(compact(connection.tokenLimit)) tok)"
+        }
+        return "\(compact(connection.remaining)) of \(compact(connection.tokenLimit)) tokens left"
+    }
+
+    private var allotmentColor: Color {
+        if connection.remaining == 0 { return .red }
+        if Double(connection.remaining) < Double(connection.tokenLimit) * 0.1 { return .orange }
+        return .secondary
     }
 
     private var displayName: String {
@@ -411,6 +512,7 @@ struct CreateGrantView: View {
 
     @State private var label = ""
     @State private var selected: Set<String> = []
+    @State private var allotment = "" // millions of tokens; blank = unlimited
     @State private var creating = false
     @State private var createdCode: String?
 
@@ -445,6 +547,15 @@ struct CreateGrantView: View {
                 TextField("Friend's name (e.g. Steve)", text: $label)
                     .textFieldStyle(.roundedBorder)
 
+                Text("Token allotment").font(.subheadline)
+                HStack(spacing: 6) {
+                    TextField("Unlimited", text: $allotment)
+                        .textFieldStyle(.roundedBorder).frame(width: 90)
+                    Text("million tokens").font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Caps how much of your subscription this friend can use. Leave blank for unlimited; you can top it up later.")
+                    .font(.caption2).foregroundStyle(.secondary)
+
                 Text("Which providers to share?").font(.subheadline)
                 Text("Leave all unchecked to share every model you have.")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -463,9 +574,10 @@ struct CreateGrantView: View {
                     Spacer()
                     Button(creating ? "Creating…" : "Create code") {
                         creating = true
+                        let limit = tokensFromMillions(allotment)
                         Task {
                             let g = await controller.createGrant(
-                                label: label, providers: Array(selected), models: [])
+                                label: label, providers: Array(selected), models: [], tokenLimit: limit)
                             creating = false
                             createdCode = g?.code
                         }
@@ -533,6 +645,20 @@ func compact(_ n: Int) -> String {
     case ..<1_000_000: return String(format: "%.1fK", v / 1_000)
     default: return String(format: "%.1fM", v / 1_000_000)
     }
+}
+
+/// tokensFromMillions parses a user-entered "millions of tokens" string into an
+/// absolute token count. Blank or unparseable (incl. negative) means unlimited (0).
+func tokensFromMillions(_ s: String) -> Int {
+    let m = Double(s.trimmingCharacters(in: .whitespaces)) ?? 0
+    return m > 0 ? Int(m * 1_000_000) : 0
+}
+
+/// millionsString renders an absolute token count back as a clean millions value
+/// for prefilling the edit field (10_000_000 -> "10", 2_500_000 -> "2.5").
+func millionsString(_ tokens: Int) -> String {
+    let m = Double(tokens) / 1_000_000
+    return m == m.rounded() ? String(Int(m)) : String(format: "%.2f", m)
 }
 
 struct StatusDot: View {

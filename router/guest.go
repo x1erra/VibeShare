@@ -34,6 +34,8 @@ type guestConn struct {
 	mu         sync.Mutex
 	hostName   string
 	hostModels []string
+	tokenLimit int64 // host-advertised allotment for this connection (0 = unlimited)
+	tokensUsed int64 // host-authoritative tokens consumed so far
 	lastSeen   int64
 	active     int
 	session    *guestSession
@@ -170,6 +172,8 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 		gc.mu.Lock()
 		gc.hostName = pc.Name
 		gc.hostModels = pc.Models
+		gc.tokenLimit = pc.TokenLimit
+		gc.tokensUsed = pc.TokensUsed
 		gc.lastSeen = time.Now().Unix()
 		gc.mu.Unlock()
 		g.notify()
@@ -593,6 +597,8 @@ type ConnStatus struct {
 	TotalReqs    int      `json:"totalReqs"`
 	InputTokens  int64    `json:"inputTokens"`
 	OutputTokens int64    `json:"outputTokens"`
+	TokenLimit   int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
+	TokensUsed   int64    `json:"tokensUsed"` // host-authoritative usage, for the remaining calc
 }
 
 func (g *GuestManager) Status(connID string) ConnStatus {
@@ -615,5 +621,7 @@ func (g *GuestManager) Status(connID string) ConnStatus {
 	st.Routing = gc.active > 0
 	st.HostName = gc.hostName
 	st.Models = append([]string(nil), gc.hostModels...)
+	st.TokenLimit = gc.tokenLimit
+	st.TokensUsed = gc.tokensUsed
 	return st
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -56,6 +57,7 @@ func (c *ControlServer) handler() http.Handler {
 	mux.HandleFunc("GET /api/status", c.getStatus)
 	mux.HandleFunc("GET /api/grants", c.listGrants)
 	mux.HandleFunc("POST /api/grants", c.createGrant)
+	mux.HandleFunc("PATCH /api/grants/{id}", c.updateGrant)
 	mux.HandleFunc("DELETE /api/grants/{id}", c.deleteGrant)
 	mux.HandleFunc("GET /api/connections", c.listConnections)
 	mux.HandleFunc("POST /api/connections", c.createConnection)
@@ -110,6 +112,7 @@ type grantView struct {
 	TotalReqs        int      `json:"totalReqs"`
 	InputTokens      int64    `json:"inputTokens"`
 	OutputTokens     int64    `json:"outputTokens"`
+	TokenLimit       int64    `json:"tokenLimit"` // 0 = unlimited
 }
 
 func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +133,7 @@ func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
 			TotalReqs:        st.TotalReqs,
 			InputTokens:      st.InputTokens,
 			OutputTokens:     st.OutputTokens,
+			TokenLimit:       g.TokenLimit,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -137,9 +141,10 @@ func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
 
 func (c *ControlServer) createGrant(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Label     string   `json:"label"`
-		Providers []string `json:"providers"`
-		Models    []string `json:"models"`
+		Label      string   `json:"label"`
+		Providers  []string `json:"providers"`
+		Models     []string `json:"models"`
+		TokenLimit int64    `json:"tokenLimit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
@@ -154,13 +159,18 @@ func (c *ControlServer) createGrant(w http.ResponseWriter, r *http.Request) {
 	if label == "" {
 		label = "Friend"
 	}
+	limit := in.TokenLimit
+	if limit < 0 {
+		limit = 0
+	}
 	g := Grant{
-		ID:        randomID(8),
-		Label:     label,
-		Code:      code,
-		Providers: in.Providers,
-		Models:    in.Models,
-		CreatedAt: time.Now().Unix(),
+		ID:         randomID(8),
+		Label:      label,
+		Code:       code,
+		Providers:  in.Providers,
+		Models:     in.Models,
+		TokenLimit: limit,
+		CreatedAt:  time.Now().Unix(),
 	}
 	if err := c.store.AddGrant(g); err != nil {
 		http.Error(w, "save failed", http.StatusInternalServerError)
@@ -175,8 +185,33 @@ func (c *ControlServer) createGrant(w http.ResponseWriter, r *http.Request) {
 		Providers:        nonNil(g.Providers),
 		Models:           nonNil(g.Models),
 		CreatedAt:        g.CreatedAt,
+		TokenLimit:       g.TokenLimit,
 		AdvertisedModels: []string{},
 	})
+}
+
+// updateGrant changes a grant's token allotment (top-up / adjust) after the code
+// was issued. Enforcement and presence read the limit live, so the change takes
+// effect on the next request without restarting the grant.
+func (c *ControlServer) updateGrant(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var in struct {
+		TokenLimit int64 `json:"tokenLimit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if err := c.store.SetGrantLimit(id, in.TokenLimit); err != nil {
+		if errors.Is(err, errGrantNotFound) {
+			http.Error(w, "grant not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "save failed", http.StatusInternalServerError)
+		}
+		return
+	}
+	c.bus.Notify()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (c *ControlServer) deleteGrant(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +236,8 @@ type connectionView struct {
 	TotalReqs    int      `json:"totalReqs"`
 	InputTokens  int64    `json:"inputTokens"`
 	OutputTokens int64    `json:"outputTokens"`
+	TokenLimit   int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
+	TokensUsed   int64    `json:"tokensUsed"` // host-authoritative usage
 }
 
 func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) {
@@ -218,6 +255,8 @@ func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) 
 			TotalReqs:    st.TotalReqs,
 			InputTokens:  st.InputTokens,
 			OutputTokens: st.OutputTokens,
+			TokenLimit:   st.TokenLimit,
+			TokensUsed:   st.TokensUsed,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
