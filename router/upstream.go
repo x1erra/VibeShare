@@ -20,8 +20,17 @@ func newUpstream(cfg func() Config) *Upstream {
 	return &Upstream{
 		cfg: cfg,
 		// No client-level timeout: chat completions stream for a long time and
-		// we cancel via context instead.
-		client: &http.Client{},
+		// we cancel via context instead. The transport bounds connection use so
+		// a flood of proxied requests can't exhaust sockets.
+		client: &http.Client{
+			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment,
+				MaxIdleConns:        64,
+				MaxIdleConnsPerHost: 16,
+				MaxConnsPerHost:     64,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
 }
 

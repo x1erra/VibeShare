@@ -20,6 +20,12 @@ import (
 // Kept small to limit replay even though the channel is already DTLS-encrypted.
 const authWindow = 90 * time.Second
 
+const (
+	maxRequestBodyBytes   = 32 << 20 // largest proxied request body (matches the front server)
+	maxInflightRequests   = 256      // most simultaneously-open request ids per guest session
+	maxConcurrentPerGrant = 8        // most requests proxied to the upstream at once, per grant
+)
+
 // allowedProxyPaths are the only upstream paths a guest may reach through a host.
 // /v1/models is deliberately excluded: guests learn the shared model list from
 // presence, so there is no reason to let them enumerate the host's full catalog.
@@ -59,7 +65,9 @@ type HostManager struct {
 type hostGrant struct {
 	grant  Grant
 	keys   grantKeys
+	ctx    context.Context // cancelled when the grant is revoked/stopped
 	cancel context.CancelFunc
+	sem    chan struct{} // bounds concurrent proxied requests (maxConcurrentPerGrant)
 
 	mu            sync.Mutex
 	sessions      map[string]*hostSession
@@ -75,12 +83,13 @@ type hostSession struct {
 	id string
 	pc *webrtc.PeerConnection
 
-	mu     sync.Mutex // guards dc + authed (written/read from pion callback goroutines)
+	mu     sync.Mutex // guards dc + authed + inbound (written/read from pion callback goroutines)
 	dc     *webrtc.DataChannel
 	authed bool
 
-	// inbound accumulates chunked request bodies keyed by request id. Only
-	// touched from pion's single per-channel OnMessage goroutine, so no lock.
+	// inbound accumulates chunked request bodies keyed by request id. Guarded
+	// by mu: pion runs one OnMessage goroutine per data channel, and a guest
+	// can open extra channels on the same session at any time.
 	inbound map[string]*inboundReq
 }
 
@@ -177,7 +186,9 @@ func (h *HostManager) startGrant(g Grant) {
 	hg := &hostGrant{
 		grant:    g,
 		keys:     keys,
+		ctx:      ctx,
 		cancel:   cancel,
+		sem:      make(chan struct{}, maxConcurrentPerGrant),
 		sessions: map[string]*hostSession{},
 	}
 	h.grants[g.ID] = hg
@@ -444,6 +455,18 @@ func (h *HostManager) closeSession(hg *hostGrant, session string) {
 	}
 }
 
+// grantActive reports whether a grant may accept NEW requests. False the instant the
+// grant is revoked (Reconcile cancels its ctx) or sharing is paused. It deliberately
+// does NOT cancel in-flight requests — proxyRequest streams off h.ctx — so a response
+// already under way completes, while the next request from a revoked/paused guest is
+// refused even on an already-open data channel.
+func (h *HostManager) grantActive(hg *hostGrant) bool {
+	if hg.ctx == nil || hg.ctx.Err() != nil {
+		return false
+	}
+	return h.store.Config().EnableSharing
+}
+
 func (h *HostManager) onFrame(hg *hostGrant, hs *hostSession, data []byte) {
 	var f frame
 	if err := json.Unmarshal(data, &f); err != nil {
@@ -471,28 +494,65 @@ func (h *HostManager) onFrame(hg *hostGrant, hs *hostSession, data []byte) {
 			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "not authenticated"})
 			return
 		}
+		if !h.grantActive(hg) {
+			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "grant revoked or sharing paused"})
+			return
+		}
+		hs.mu.Lock()
 		if hs.inbound == nil {
 			hs.inbound = map[string]*inboundReq{}
 		}
-		hs.inbound[f.ID] = &inboundReq{method: f.Method, path: f.Path}
-	case "reqdata":
-		if ir := hs.inbound[f.ID]; ir != nil {
-			chunk, err := base64.StdEncoding.DecodeString(f.B64)
-			if err == nil {
-				ir.body = append(ir.body, chunk...)
-			}
+		if len(hs.inbound) >= maxInflightRequests {
+			hs.mu.Unlock()
+			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "too many in-flight requests"})
+			return
 		}
-	case "reqend":
-		if ir := hs.inbound[f.ID]; ir != nil {
+		hs.inbound[f.ID] = &inboundReq{method: f.Method, path: f.Path}
+		hs.mu.Unlock()
+	case "reqdata":
+		chunk, err := base64.StdEncoding.DecodeString(f.B64)
+		if err != nil {
+			return
+		}
+		hs.mu.Lock()
+		ir := hs.inbound[f.ID]
+		if ir == nil {
+			hs.mu.Unlock()
+			return
+		}
+		if len(ir.body)+len(chunk) > maxRequestBodyBytes {
 			delete(hs.inbound, f.ID)
+			hs.mu.Unlock()
+			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "request body too large"})
+			return
+		}
+		ir.body = append(ir.body, chunk...)
+		hs.mu.Unlock()
+	case "reqend":
+		hs.mu.Lock()
+		ir := hs.inbound[f.ID]
+		delete(hs.inbound, f.ID)
+		hs.mu.Unlock()
+		if ir == nil {
+			return
+		}
+		select {
+		case hg.sem <- struct{}{}:
 			go h.proxyRequest(hg, hs, f.ID, ir.method, ir.path, ir.body)
+		default:
+			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "host busy: too many concurrent requests, retry shortly"})
 		}
 	}
 }
 
 func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, path string, body []byte) {
+	defer func() { <-hg.sem }() // release the slot acquired in onFrame's "reqend"
 	dc := hs.channel()
 	if dc == nil {
+		return
+	}
+	if !h.grantActive(hg) {
+		_ = sendFrame(dc, frame{T: "err", ID: id, Msg: "grant revoked or sharing paused"})
 		return
 	}
 	// Every allowed path is a completion-style POST carrying a model; parse it

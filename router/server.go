@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,7 +43,7 @@ func (s *FrontServer) handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handleCompletion)
 	// Anything else is forwarded to the local upstream unchanged.
 	mux.HandleFunc("/", s.handlePassthrough)
-	return withCORS(mux)
+	return loopbackGuard(mux)
 }
 
 // localModels returns the upstream model objects and an id set, cached briefly.
@@ -192,17 +194,39 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func withCORS(next http.Handler) http.Handler {
+func loopbackGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		// The Swift UI (URLSession) and CLI tools never send an Origin header;
+		// only browsers do. Rejecting it kills cross-site reads/writes + preflight.
+		if r.Header.Get("Origin") != "" {
+			http.Error(w, "cross-origin requests are not allowed", http.StatusForbidden)
+			return
+		}
+		// Require a loopback Host to defeat DNS-rebinding.
+		if !isLoopbackHost(r.Host) {
+			http.Error(w, "request Host is not loopback", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return true // HTTP/1.0 client without a Host header — local tooling only
+	}
+	hostname := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostname = h
+	}
+	hostname = strings.TrimSuffix(strings.TrimPrefix(hostname, "["), "]")
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // startHTTP starts an HTTP server on 127.0.0.1:port and returns it.
@@ -210,6 +234,9 @@ func startHTTP(ctx context.Context, port int, handler http.Handler) *http.Server
 	srv := &http.Server{
 		Addr:    "127.0.0.1:" + strconv.Itoa(port),
 		Handler: handler,
+		// Slowloris resistance. No Read/WriteTimeout — they'd break SSE streaming.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	go func() {
 		<-ctx.Done()

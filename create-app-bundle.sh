@@ -18,28 +18,21 @@ GO_BIN="$(command -v go || echo /opt/homebrew/bin/go)"
 # Silicon and Intel Macs. Default builds for this machine's architecture only.
 UNIVERSAL="${UNIVERSAL:-0}"
 
-# Downloads a cli-proxy-api asset matching $1 (regex) and prints the binary path.
-dl_cliproxy() {
-  local pat="$1" out="$2"
-  local url
-  url="$(curl -s -f https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest \
-    | python3 -c "import sys,json,re;d=json.load(sys.stdin);p=re.compile(r'$pat.*\.tar\.gz\$');print(next(a['browser_download_url'] for a in d['assets'] if p.search(a['name'])))")"
-  mkdir -p "$out"; curl -s -L -o "$out/c.tgz" "$url"; tar -xzf "$out/c.tgz" -C "$out"
-  find "$out" -type f \( -name 'cli-proxy-api*' -o -name 'CLIProxyAPI*' \) ! -name '*.yaml' ! -name '*.md' | head -1
-}
-
-# 1. Provider engine binary.
+FETCH="$PROJECT_DIR/scripts/fetch-cliproxyapi.sh"
+# 1. Provider engine binary — pinned + checksum-verified by fetch-cliproxyapi.sh.
+#    Cached in Resources, so this only downloads on a fresh clone or version bump.
 if [ "$UNIVERSAL" = "1" ]; then
-  echo -e "${BLUE}Building universal cli-proxy-api (arm64 + x86_64)...${NC}"
+  echo -e "${BLUE}Fetching universal cli-proxy-api (arm64 + x86_64)...${NC}"
   TMP_CPA="$(mktemp -d)"
-  CPA_ARM="$(dl_cliproxy 'darwin_(aarch64|arm64)' "$TMP_CPA/arm")"
-  CPA_AMD="$(dl_cliproxy 'darwin_(amd64|x86_64)' "$TMP_CPA/amd")"
-  lipo -create "$CPA_ARM" "$CPA_AMD" -output "$RESOURCES_DIR/cli-proxy-api-plus"
+  "$FETCH" arm64  "$TMP_CPA/cpa-arm64"
+  "$FETCH" x86_64 "$TMP_CPA/cpa-amd64"
+  rm -f "$RESOURCES_DIR/cli-proxy-api-plus"
+  lipo -create "$TMP_CPA/cpa-arm64" "$TMP_CPA/cpa-amd64" -output "$RESOURCES_DIR/cli-proxy-api-plus"
   chmod +x "$RESOURCES_DIR/cli-proxy-api-plus"
   rm -rf "$TMP_CPA"
 elif [ ! -f "$RESOURCES_DIR/cli-proxy-api-plus" ]; then
   echo -e "${BLUE}Fetching cli-proxy-api...${NC}"
-  "$PROJECT_DIR/scripts/fetch-cliproxyapi.sh"
+  "$FETCH"
 fi
 
 # 2. Build the Go router into Resources.
