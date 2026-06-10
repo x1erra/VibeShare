@@ -80,6 +80,9 @@ func main() {
 
 	bus := newEventBus()
 	upstream := newUpstream(store.Config)
+	// Polls the host's own provider subscription limits (5-hour + weekly) by
+	// reusing the OAuth tokens cli-proxy-api keeps in its default auth dir.
+	subUsage := newSubscriptionMonitor("~/.cli-proxy-api")
 
 	nostr := newNostrClient(cfg.NostrRelays)
 	nostr.Start(ctx)
@@ -97,6 +100,7 @@ func main() {
 		upstream: upstream,
 		nostr:    nostr,
 		bus:      bus,
+		subUsage: subUsage,
 	}
 
 	frontSrv := startHTTP(ctx, cfg.FrontPort, front.handler())
