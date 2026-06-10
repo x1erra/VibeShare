@@ -69,7 +69,7 @@ func (c *ControlServer) handler() http.Handler {
 	mux.HandleFunc("PUT /api/config", c.putConfig)
 	mux.HandleFunc("GET /api/events", c.events)
 	mux.HandleFunc("GET /api/activity", c.getActivity)
-	return withCORS(mux)
+	return loopbackGuard(mux)
 }
 
 type relayStatus struct {
