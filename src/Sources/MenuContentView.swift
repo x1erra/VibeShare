@@ -111,11 +111,23 @@ struct HeaderView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(spacing: 8) {
                 Image(systemName: "person.2.wave.2.fill")
                     .foregroundStyle(.tint)
                 Text("VibeShare").font(.headline)
                 Spacer()
+                // Master switch: flips EnableSharing, which stops presence and
+                // refuses new requests for every grant at once (in-flight finish).
+                Toggle(isOn: Binding(
+                    get: { sharingOn },
+                    set: { on in Task { await controller.setSharingEnabled(on) } }
+                )) {
+                    Text("Sharing").font(.caption)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .disabled(!running)
+                .help("Pause or resume sharing with every friend at once")
                 StatusDot(on: running)
                 Text(running ? "Running" : "Starting…")
                     .font(.caption).foregroundStyle(.secondary)

@@ -35,15 +35,17 @@ type guestConn struct {
 	peerID string
 	cancel context.CancelFunc
 
-	mu         sync.Mutex
-	hostName   string
-	hostModels []string
-	hostPaused bool  // host paused sharing (still online, advertising 0 models)
-	tokenLimit int64 // host-advertised allotment for this connection (0 = unlimited)
-	tokensUsed int64 // host-authoritative tokens consumed so far
-	lastSeen   int64
-	active     int
-	session    *guestSession
+	mu          sync.Mutex
+	hostName    string
+	hostModels  []string
+	hostPaused  bool     // host paused sharing (still online, advertising 0 models)
+	hostReason  string   // why the host is fully paused (e.g. session usage limit), if given
+	hostLimited []string // providers the host auto-paused by reserve (partial or full)
+	tokenLimit  int64    // host-advertised allotment for this connection (0 = unlimited)
+	tokensUsed  int64    // host-authoritative tokens consumed so far
+	lastSeen    int64
+	active      int
+	session     *guestSession
 }
 
 type guestSession struct {
@@ -180,6 +182,8 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 		gc.hostName = pc.Name
 		gc.hostModels = pc.Models
 		gc.hostPaused = pc.Paused
+		gc.hostReason = pc.Reason
+		gc.hostLimited = pc.LimitedProviders
 		gc.tokenLimit = pc.TokenLimit
 		gc.tokensUsed = pc.TokensUsed
 		gc.lastSeen = time.Now().Unix()
@@ -716,16 +720,18 @@ func (s *guestSession) isClosed() bool {
 
 // ConnStatus is the guest-side runtime view of one connection.
 type ConnStatus struct {
-	Online       bool     `json:"online"`
-	Routing      bool     `json:"routing"`
-	Paused       bool     `json:"paused"` // host paused sharing (still online)
-	HostName     string   `json:"hostName"`
-	Models       []string `json:"models"`
-	TotalReqs    int      `json:"totalReqs"`
-	InputTokens  int64    `json:"inputTokens"`
-	OutputTokens int64    `json:"outputTokens"`
-	TokenLimit   int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
-	TokensUsed   int64    `json:"tokensUsed"` // host-authoritative usage, for the remaining calc
+	Online           bool     `json:"online"`
+	Routing          bool     `json:"routing"`
+	Paused           bool     `json:"paused"`                     // host paused sharing (still online)
+	PausedReason     string   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
+	LimitedProviders []string `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve (partial or full)
+	HostName         string   `json:"hostName"`
+	Models           []string `json:"models"`
+	TotalReqs        int      `json:"totalReqs"`
+	InputTokens      int64    `json:"inputTokens"`
+	OutputTokens     int64    `json:"outputTokens"`
+	TokenLimit       int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
+	TokensUsed       int64    `json:"tokensUsed"` // host-authoritative usage, for the remaining calc
 }
 
 func (g *GuestManager) Status(connID string) ConnStatus {
@@ -747,6 +753,8 @@ func (g *GuestManager) Status(connID string) ConnStatus {
 	st.Online = time.Now().Unix()-gc.lastSeen < 60
 	st.Routing = gc.active > 0
 	st.Paused = gc.hostPaused
+	st.PausedReason = gc.hostReason
+	st.LimitedProviders = append([]string(nil), gc.hostLimited...)
 	st.HostName = gc.hostName
 	st.Models = append([]string(nil), gc.hostModels...)
 	st.TokenLimit = gc.tokenLimit

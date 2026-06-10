@@ -30,6 +30,14 @@ type Config struct {
 	NostrRelays    []string `json:"nostrRelays"`    // signaling relays
 	IdentityName   string   `json:"identityName"`   // human label others see ("Brandon's Mac")
 	EnableSharing  bool     `json:"enableSharing"`  // master switch for the P2P layer
+
+	// AutoStopSharing keeps a slice of each provider's subscription for the host:
+	// when a provider's 5-hour session window climbs past 100-UsageReservePercent,
+	// that provider's models stop being shared until the window resets. The reserve
+	// is evaluated per provider against its own session usage, so a busy Claude
+	// window pauses Claude sharing while Codex keeps flowing (and vice versa).
+	AutoStopSharing     bool `json:"autoStopSharing"`
+	UsageReservePercent int  `json:"usageReservePercent"` // 1..95, the buffer kept for myself
 }
 
 func defaultConfig() Config {
@@ -38,12 +46,14 @@ func defaultConfig() Config {
 		host = "My Mac"
 	}
 	return Config{
-		FrontPort:     8788,
-		ControlPort:   8799,
-		UpstreamURL:   "http://127.0.0.1:8317",
-		NostrRelays:   append([]string(nil), defaultNostrRelays...),
-		IdentityName:  host,
-		EnableSharing: true,
+		FrontPort:           8788,
+		ControlPort:         8799,
+		UpstreamURL:         "http://127.0.0.1:8317",
+		NostrRelays:         append([]string(nil), defaultNostrRelays...),
+		IdentityName:        host,
+		EnableSharing:       true,
+		AutoStopSharing:     false,
+		UsageReservePercent: 20,
 	}
 }
 
@@ -117,6 +127,9 @@ func openStore(dir string) (*Store, error) {
 	}
 	if len(s.config.NostrRelays) == 0 {
 		s.config.NostrRelays = append([]string(nil), defaultNostrRelays...)
+	}
+	if s.config.UsageReservePercent == 0 {
+		s.config.UsageReservePercent = 20 // sane default for the slider before it's touched
 	}
 	return s, nil
 }

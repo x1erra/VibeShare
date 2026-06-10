@@ -8,6 +8,8 @@ struct RouterStatus: Codable {
     var controlPort: Int
     var identityName: String
     var sharingEnabled: Bool
+    var autoStopSharing: Bool?
+    var usageReservePercent: Int?
     var upstream: UpstreamStatus
     var nostr: NostrStatus
     var localModels: [String]?
@@ -28,6 +30,10 @@ struct RouterStatus: Codable {
 
     var models: [String] { localModels ?? [] }
     var connectedRelayCount: Int { nostr.relays.filter { $0.connected }.count }
+
+    /// Session-reserve gate state (host keeps a buffer of each provider's quota).
+    var autoStopSharingOn: Bool { autoStopSharing ?? false }
+    var usageReserve: Int { usageReservePercent ?? 20 }
 }
 
 /// One provider's subscription window state, fetched by the router from that
@@ -85,6 +91,8 @@ struct GrantView: Codable, Identifiable {
     var paused: Bool
     var online: Bool
     var routing: Bool
+    var usageLimited: Bool // fully auto-paused: reserve gate hid ALL shared models
+    var limitedProviders: [String] // providers the reserve gate paused (partial or full)
     var advertisedModels: [String]
     var totalReqs: Int
     var inputTokens: Int
@@ -113,6 +121,8 @@ struct GrantView: Codable, Identifiable {
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         online = try c.decodeIfPresent(Bool.self, forKey: .online) ?? false
         routing = try c.decodeIfPresent(Bool.self, forKey: .routing) ?? false
+        usageLimited = try c.decodeIfPresent(Bool.self, forKey: .usageLimited) ?? false
+        limitedProviders = try c.decodeIfPresent([String].self, forKey: .limitedProviders) ?? []
         advertisedModels = try c.decodeIfPresent([String].self, forKey: .advertisedModels) ?? []
         totalReqs = try c.decodeIfPresent(Int.self, forKey: .totalReqs) ?? 0
         inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
@@ -128,6 +138,8 @@ struct ConnectionView: Codable, Identifiable {
     var online: Bool
     var routing: Bool
     var paused: Bool // host paused sharing (still online)
+    var pausedReason: String // why the host is paused (e.g. usage limit), "" if not given
+    var limitedProviders: [String] // providers the host auto-paused by reserve (partial or full)
     var hostName: String
     var models: [String]
     var totalReqs: Int
@@ -153,6 +165,8 @@ struct ConnectionView: Codable, Identifiable {
         online = try c.decodeIfPresent(Bool.self, forKey: .online) ?? false
         routing = try c.decodeIfPresent(Bool.self, forKey: .routing) ?? false
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        pausedReason = try c.decodeIfPresent(String.self, forKey: .pausedReason) ?? ""
+        limitedProviders = try c.decodeIfPresent([String].self, forKey: .limitedProviders) ?? []
         hostName = try c.decodeIfPresent(String.self, forKey: .hostName) ?? ""
         models = try c.decodeIfPresent([String].self, forKey: .models) ?? []
         totalReqs = try c.decodeIfPresent(Int.self, forKey: .totalReqs) ?? 0
@@ -171,6 +185,22 @@ struct RouterConfig: Codable {
     var nostrRelays: [String]
     var identityName: String
     var enableSharing: Bool
+    var autoStopSharing: Bool
+    var usageReservePercent: Int
+
+    // Tolerant decoding so an older router that predates these fields still loads.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        frontPort = try c.decodeIfPresent(Int.self, forKey: .frontPort) ?? 8788
+        controlPort = try c.decodeIfPresent(Int.self, forKey: .controlPort) ?? 8799
+        upstreamUrl = try c.decodeIfPresent(String.self, forKey: .upstreamUrl) ?? ""
+        upstreamApiKey = try c.decodeIfPresent(String.self, forKey: .upstreamApiKey) ?? ""
+        nostrRelays = try c.decodeIfPresent([String].self, forKey: .nostrRelays) ?? []
+        identityName = try c.decodeIfPresent(String.self, forKey: .identityName) ?? ""
+        enableSharing = try c.decodeIfPresent(Bool.self, forKey: .enableSharing) ?? true
+        autoStopSharing = try c.decodeIfPresent(Bool.self, forKey: .autoStopSharing) ?? false
+        usageReservePercent = try c.decodeIfPresent(Int.self, forKey: .usageReservePercent) ?? 20
+    }
 }
 
 /// One routed request in the live activity feed (mirrors the router's

@@ -50,14 +50,19 @@ type provState struct {
 
 // usageSource describes how to fetch one provider's usage.
 type usageSource struct {
-	key      string                                        // matches the UI provider key ("claude", "codex")
-	credFile func(name string) bool                        // matches that provider's cred files in authDir
+	key      string                 // matches the UI provider key ("claude", "codex")
+	credFile func(name string) bool // matches that provider's cred files in authDir
 	fetch    func(c *http.Client, cr rawCred) (ProviderUsage, int, error)
 }
 
 const (
 	refreshTTL = 10 * time.Minute
 	backoff429 = 30 * time.Minute
+	// manualRefreshMinInterval throttles the UI's "refresh now" button so a
+	// spammed click can't hammer the provider's rate-limited usage endpoint. It
+	// still bypasses the 10-minute staleness TTL (the button's whole point), just
+	// not a fetch from the last few seconds or an active 429/soft backoff.
+	manualRefreshMinInterval = 20 * time.Second
 )
 
 var (
@@ -105,6 +110,71 @@ func (m *SubscriptionMonitor) MaybeRefresh() map[string]ProviderUsage {
 	}
 	m.mu.Unlock()
 	return out
+}
+
+// SessionUtilization returns the provider's most-recent 5-hour session window
+// usage (0..100) and whether it is known. It reads the cached snapshot only —
+// the UI's status poll already drives refreshes — so the host's sharing gate
+// never adds network calls. known is false when the provider has never been
+// polled successfully or exposes no session window, so callers can fail open.
+func (m *SubscriptionMonitor) SessionUtilization(provider string) (float64, bool) {
+	m.mu.Lock()
+	snap, ok := m.snaps[provider]
+	m.mu.Unlock()
+	if !ok || snap.UpdatedAt == 0 {
+		return 0, false
+	}
+	for _, w := range snap.Windows {
+		if strings.HasPrefix(strings.ToLower(w.Label), "session") {
+			return w.Utilization, true
+		}
+	}
+	return 0, false
+}
+
+// Refresh forces an immediate, synchronous usage fetch for one provider,
+// bypassing the staleness TTL and any soft backoff (the user explicitly asked
+// for fresh numbers via the UI's refresh button). It skips only if a background
+// refresh is already in flight. Returns the resulting snapshot and whether the
+// provider key is known.
+func (m *SubscriptionMonitor) Refresh(provider string) (ProviderUsage, bool) {
+	var src usageSource
+	found := false
+	for _, s := range m.sources {
+		if s.key == provider {
+			src, found = s, true
+			break
+		}
+	}
+	if !found {
+		return ProviderUsage{}, false
+	}
+	now := time.Now().Unix()
+	m.mu.Lock()
+	st := m.pstate[src.key]
+	if st == nil {
+		st = &provState{}
+		m.pstate[src.key] = st
+	}
+	snap := m.snaps[src.key]
+	// Skip the fetch if one is already in flight, if we're inside a 429/soft
+	// backoff (protect the host's real token), or if a successful fetch landed
+	// within the last interval — return the current snapshot in those cases.
+	if st.refreshing ||
+		now < st.backoffUntil ||
+		(snap.UpdatedAt != 0 && now-snap.UpdatedAt < int64(manualRefreshMinInterval.Seconds())) {
+		m.mu.Unlock()
+		return snap, true
+	}
+	st.refreshing = true
+	m.mu.Unlock()
+
+	m.refresh(src) // synchronous; its defer clears refreshing and stores the result
+
+	m.mu.Lock()
+	snap = m.snaps[src.key]
+	m.mu.Unlock()
+	return snap, true
 }
 
 func (m *SubscriptionMonitor) refresh(src usageSource) {
