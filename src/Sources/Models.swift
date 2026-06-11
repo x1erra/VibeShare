@@ -177,30 +177,12 @@ struct ConnectionView: Codable, Identifiable {
     }
 }
 
-struct RouterConfig: Codable {
-    var frontPort: Int
-    var controlPort: Int
-    var upstreamUrl: String
-    var upstreamApiKey: String
-    var nostrRelays: [String]
-    var identityName: String
-    var enableSharing: Bool
-    var autoStopSharing: Bool
-    var usageReservePercent: Int
-
-    // Tolerant decoding so an older router that predates these fields still loads.
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        frontPort = try c.decodeIfPresent(Int.self, forKey: .frontPort) ?? 8788
-        controlPort = try c.decodeIfPresent(Int.self, forKey: .controlPort) ?? 8799
-        upstreamUrl = try c.decodeIfPresent(String.self, forKey: .upstreamUrl) ?? ""
-        upstreamApiKey = try c.decodeIfPresent(String.self, forKey: .upstreamApiKey) ?? ""
-        nostrRelays = try c.decodeIfPresent([String].self, forKey: .nostrRelays) ?? []
-        identityName = try c.decodeIfPresent(String.self, forKey: .identityName) ?? ""
-        enableSharing = try c.decodeIfPresent(Bool.self, forKey: .enableSharing) ?? true
-        autoStopSharing = try c.decodeIfPresent(Bool.self, forKey: .autoStopSharing) ?? false
-        usageReservePercent = try c.decodeIfPresent(Int.self, forKey: .usageReservePercent) ?? 20
-    }
+struct RouterConfigUpdate: Encodable {
+    var nostrRelays: [String]? = nil
+    var identityName: String? = nil
+    var enableSharing: Bool? = nil
+    var autoStopSharing: Bool? = nil
+    var usageReservePercent: Int? = nil
 }
 
 /// One routed request in the live activity feed (mirrors the router's

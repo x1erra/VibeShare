@@ -27,9 +27,6 @@ struct RouterClient {
     func connections() async throws -> [ConnectionView] {
         try await get("/api/connections")
     }
-    func config() async throws -> RouterConfig {
-        try await get("/api/config")
-    }
     func activity(limit: Int = 50) async throws -> [ActivityEntry] {
         try await get("/api/activity?limit=\(limit)")
     }
@@ -76,8 +73,8 @@ struct RouterClient {
     func removeConnection(id: String) async throws {
         _ = try await raw("/api/connections/\(id)", method: "DELETE", body: nil)
     }
-    func updateConfig(_ cfg: RouterConfig) async throws {
-        let data = try JSONEncoder().encode(cfg)
+    func updateConfig(_ update: RouterConfigUpdate) async throws {
+        let data = try JSONEncoder().encode(update)
         _ = try await raw("/api/config", method: "PUT", body: data)
     }
     /// Force an immediate usage refetch for one provider (bypasses the 10-min

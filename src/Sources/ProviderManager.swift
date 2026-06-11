@@ -7,7 +7,7 @@ import Combine
 struct ProviderInfo: Identifiable {
     let key: String
     let name: String
-    let loginFlag: String?
+    let loginFlag: String
     let symbol: String
     let modelHints: [String]
     var id: String { key }
@@ -86,7 +86,6 @@ final class ProviderManager: ObservableObject {
     /// writes credentials into ~/.cli-proxy-api, which the running server then
     /// hot-reloads.
     func connect(_ provider: ProviderInfo) {
-        guard let flag = provider.loginFlag else { return }
         guard let bin = AppPaths.providerBinary else {
             lastError = "cli-proxy-api binary missing"
             return
@@ -100,7 +99,7 @@ final class ProviderManager: ObservableObject {
 
         let proc = Process()
         proc.executableURL = bin
-        proc.arguments = [flag, "-config", AppPaths.providerConfigPath().path]
+        proc.arguments = [provider.loginFlag, "-config", AppPaths.providerConfigPath().path]
         let logURL = loginLogURL(provider)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let handle = try? FileHandle(forWritingTo: logURL)
