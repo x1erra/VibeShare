@@ -41,6 +41,13 @@ func (u *Upstream) base() string {
 // do issues a request to the upstream, attaching the API key if configured.
 // The caller owns resp.Body and must close it.
 func (u *Upstream) do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	return u.doWithHeaders(ctx, method, path, body, nil)
+}
+
+// doWithHeaders issues a request to the upstream while preserving safe client
+// headers. Client credentials are deliberately stripped; the local upstream key,
+// if any, is supplied from VibeShare's own config.
+func (u *Upstream) doWithHeaders(ctx context.Context, method, path string, body []byte, headers http.Header) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
@@ -49,12 +56,42 @@ func (u *Upstream) do(ctx context.Context, method, path string, body []byte) (*h
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "*/*")
+	for k, vals := range cloneForwardHeaders(headers) {
+		req.Header[k] = vals
+	}
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "*/*")
+	}
 	if key := u.cfg().UpstreamAPIKey; key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	return u.client.Do(req)
+}
+
+func cloneForwardHeaders(src http.Header) http.Header {
+	out := http.Header{}
+	for k, vals := range src {
+		if skipForwardHeader(k) {
+			continue
+		}
+		out[k] = append([]string(nil), vals...)
+	}
+	return out
+}
+
+func skipForwardHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "authorization", "x-api-key", "api-key",
+		"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+		"te", "trailer", "transfer-encoding", "upgrade",
+		"content-length", "host", "accept-encoding":
+		return true
+	default:
+		return false
+	}
 }
 
 // Reachable reports whether the upstream answers /v1/models quickly.

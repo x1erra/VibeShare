@@ -266,6 +266,7 @@ type connectionView struct {
 	RedeemedAt       int64    `json:"redeemedAt"`
 	Online           bool     `json:"online"`
 	Routing          bool     `json:"routing"`
+	Revoked          bool     `json:"revoked"`
 	Paused           bool     `json:"paused"`                     // host paused sharing (still online)
 	PausedReason     string   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
 	LimitedProviders []string `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve
@@ -282,17 +283,23 @@ func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) 
 	out := []connectionView{}
 	for _, conn := range c.store.Connections() {
 		st := c.guest.Status(conn.ID)
+		revoked := conn.Revoked || st.Revoked
+		models := st.Models
+		if revoked {
+			models = nil
+		}
 		out = append(out, connectionView{
 			ID:               conn.ID,
 			Label:            conn.Label,
 			RedeemedAt:       conn.RedeemedAt,
-			Online:           st.Online,
-			Routing:          st.Routing,
-			Paused:           st.Paused,
+			Online:           !revoked && st.Online,
+			Routing:          !revoked && st.Routing,
+			Revoked:          revoked,
+			Paused:           !revoked && st.Paused,
 			PausedReason:     st.PausedReason,
 			LimitedProviders: nonNil(st.LimitedProviders),
 			HostName:         st.HostName,
-			Models:           nonNil(st.Models),
+			Models:           nonNil(models),
 			TotalReqs:        st.TotalReqs,
 			InputTokens:      st.InputTokens,
 			OutputTokens:     st.OutputTokens,
@@ -327,7 +334,11 @@ func (c *ControlServer) createConnection(w http.ResponseWriter, r *http.Request)
 		RedeemedAt: time.Now().Unix(),
 	}
 	if err := c.store.AddConnection(conn); err != nil {
-		http.Error(w, "save failed", http.StatusInternalServerError)
+		if errors.Is(err, errConnectionExists) {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "connection already exists"})
+		} else {
+			http.Error(w, "save failed", http.StatusInternalServerError)
+		}
 		return
 	}
 	c.guest.Reconcile()

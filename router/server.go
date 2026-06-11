@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -19,6 +20,7 @@ type FrontServer struct {
 	store    *Store
 	upstream *Upstream
 	guest    *GuestManager
+	subUsage *SubscriptionMonitor
 
 	cacheMu sync.Mutex
 	cacheAt time.Time
@@ -26,8 +28,8 @@ type FrontServer struct {
 	cacheM  []modelObject
 }
 
-func newFrontServer(store *Store, upstream *Upstream, guest *GuestManager) *FrontServer {
-	return &FrontServer{store: store, upstream: upstream, guest: guest}
+func newFrontServer(store *Store, upstream *Upstream, guest *GuestManager, subUsage *SubscriptionMonitor) *FrontServer {
+	return &FrontServer{store: store, upstream: upstream, guest: guest, subUsage: subUsage}
 }
 
 func (s *FrontServer) handler() http.Handler {
@@ -114,12 +116,18 @@ func (s *FrontServer) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Local model -> forward to upstream.
 	if localIDs[probe.Model] {
+		if provider, exhausted := s.localSessionExhausted(probe.Model); exhausted &&
+			s.guest.CanRouteWithBudget(probe.Model) {
+			log.Printf("front: local %s session exhausted for %s; routing to friend", provider, probe.Model)
+			_ = s.guest.RouteRequest(r.Context(), probe.Model, r.Method, r.URL.Path, r.Header, body, w)
+			return
+		}
 		s.forwardLocal(w, r, body)
 		return
 	}
 	// 2. A friend shares it -> route over WebRTC.
 	if s.guest.CanRoute(probe.Model) {
-		if err := s.guest.RouteRequest(r.Context(), probe.Model, r.Method, r.URL.Path, body, w); err != nil {
+		if err := s.guest.RouteRequest(r.Context(), probe.Model, r.Method, r.URL.Path, r.Header, body, w); err != nil {
 			// RouteRequest writes the response itself unless it failed before headers.
 			return
 		}
@@ -160,9 +168,21 @@ func (s *FrontServer) handlePassthrough(w http.ResponseWriter, r *http.Request) 
 	s.forwardLocal(w, r, body)
 }
 
+func (s *FrontServer) localSessionExhausted(model string) (provider string, exhausted bool) {
+	if s.subUsage == nil {
+		return "", false
+	}
+	key := monitoredProviderForModel(model)
+	if key == "" {
+		return "", false
+	}
+	util, known := s.subUsage.SessionUtilization(key)
+	return providerDisplayName(key), known && util >= 100
+}
+
 // forwardLocal streams a request through to the local cli-proxy-api.
 func (s *FrontServer) forwardLocal(w http.ResponseWriter, r *http.Request, body []byte) {
-	resp, err := s.upstream.do(r.Context(), r.Method, r.URL.RequestURI(), body)
+	resp, err := s.upstream.doWithHeaders(r.Context(), r.Method, r.URL.RequestURI(), body, r.Header)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error": map[string]any{

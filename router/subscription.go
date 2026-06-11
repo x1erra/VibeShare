@@ -133,10 +133,9 @@ func (m *SubscriptionMonitor) SessionUtilization(provider string) (float64, bool
 }
 
 // Refresh forces an immediate, synchronous usage fetch for one provider,
-// bypassing the staleness TTL and any soft backoff (the user explicitly asked
-// for fresh numbers via the UI's refresh button). It skips only if a background
-// refresh is already in flight. Returns the resulting snapshot and whether the
-// provider key is known.
+// bypassing the staleness TTL while still respecting active refreshes and
+// provider backoff. Returns the resulting snapshot and whether the provider key
+// is known.
 func (m *SubscriptionMonitor) Refresh(provider string) (ProviderUsage, bool) {
 	var src usageSource
 	found := false

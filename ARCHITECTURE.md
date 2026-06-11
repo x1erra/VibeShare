@@ -75,7 +75,7 @@ tagged `["d", roomID]` and a `t` type. All content is sealed with `announceKey`.
 
 | `t`        | direction    | content (decrypted JSON)                                                    |
 |------------|--------------|-----------------------------------------------------------------------------|
-| `presence` | host → room  | `{role:"host", name, models:[...], paused?, tokenLimit?, tokensUsed?, ts}`  |
+| `presence` | host → room  | `{role:"host", name, models:[...], paused?, revoked?, tokenLimit?, tokensUsed?, ts}` |
 | `presence` | guest → room | `{role:"guest", peer, routing, ts}`                                         |
 | `signal`   | both         | `{from, session, kind:"offer"\|"answer"\|"ice", payload}`                   |
 
@@ -105,9 +105,11 @@ The **host enforces** that `path` is allow-listed (`/v1/chat/completions`,
 * `GET /v1/models` → union of **local** models (from `cli-proxy-api`) and
   **remote** models advertised by online friends; local wins on collision.
 * `POST /v1/chat/completions` (OpenAI) and `POST /v1/messages` (Anthropic /
-  Claude Code) → serve locally if the model is available, else **auto-route** to
-  an online friend that shares it, else `404`. Both carry a top-level `model`,
-  so the routing logic is shared.
+  Claude Code) → serve locally if the model is available, unless it is a
+  monitored Claude/Codex model and the local 5-hour session is known exhausted.
+  In that exhaustion case, or when the model is not local, **auto-route** to an
+  online friend that shares it, else `404`. Both carry a top-level `model`, so
+  the routing logic is shared.
 
 When several friends share the same model, the guest ranks them (`guest.go
 hostsForModel`): **sticky** first (the host that last served this model — keeps
@@ -138,6 +140,13 @@ A grant can be **paused**: the host keeps broadcasting presence (with
 `paused:true` and no models) but refuses requests, so the guest sees "paused"
 rather than "offline" and the code survives to be resumed — unlike revoke,
 which kills the code permanently.
+
+When a grant is **revoked**, the host publishes a terminal presence with
+`revoked:true` before leaving the room. Guests persist that state on the held
+connection, hide its models from `/v1/models`, exclude it from routing, and show
+the row as removable in the Borrow tab. The host also republishes recent revoke
+tombstones while running, so a guest that was offline at the exact revoke moment
+can still observe the terminal state later.
 
 ## On-disk state (`~/.vibeshare/`)
 

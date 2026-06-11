@@ -119,8 +119,20 @@ struct RouterClient {
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else { return data }
         if http.statusCode >= 400 {
-            throw ClientError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+            throw ClientError.http(http.statusCode, errorMessage(from: data))
         }
         return data
+    }
+
+    private func errorMessage(from data: Data) -> String {
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = obj["error"] {
+            if let text = error as? String { return text }
+            if let dict = error as? [String: Any],
+               let message = dict["message"] as? String {
+                return message
+            }
+        }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }

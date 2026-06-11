@@ -95,7 +95,7 @@ func main() {
 	hostMgr.Reconcile()
 	guestMgr.Reconcile()
 
-	front := newFrontServer(store, upstream, guestMgr)
+	front := newFrontServer(store, upstream, guestMgr, subUsage)
 	control := &ControlServer{
 		store:    store,
 		host:     hostMgr,

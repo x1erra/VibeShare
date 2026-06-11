@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
 
 	"github.com/pion/webrtc/v3"
 )
@@ -39,6 +40,7 @@ type presenceContent struct {
 	Models           []string `json:"models,omitempty"` // models the host is sharing via this grant
 	Peer             string   `json:"peer,omitempty"`   // guest's ephemeral session id
 	Routing          bool     `json:"routing,omitempty"`
+	Revoked          bool     `json:"revoked,omitempty"`    // host→guest: grant was revoked permanently
 	Paused           bool     `json:"paused,omitempty"`     // host→guest: sharing temporarily paused (still online)
 	Reason           string   `json:"reason,omitempty"`     // host→guest: why fully paused (e.g. session usage limit)
 	LimitedProviders []string `json:"limited,omitempty"`    // host→guest: providers auto-paused by the reserve (partial or full)
@@ -49,15 +51,16 @@ type presenceContent struct {
 
 // frame is a JSON message sent over the WebRTC DataChannel.
 type frame struct {
-	T       string `json:"t"`                 // auth|auth_ok|auth_err|req|head|data|end|err
-	ID      string `json:"id,omitempty"`      // request id (req/head/data/end/err)
-	Method  string `json:"method,omitempty"`  // request method (req); defaults to POST
-	Path    string `json:"path,omitempty"`    // request path (req)
-	Status  int    `json:"status,omitempty"`  // response status (head)
-	Ctype   string `json:"ctype,omitempty"`   // response content-type (head)
-	B64     string `json:"b64,omitempty"`     // response body chunk, base64 (data)
-	Msg     string `json:"msg,omitempty"`     // error / auth message
-	Payload string `json:"payload,omitempty"` // sealed {ts} for auth
+	T       string      `json:"t"`                 // auth|auth_ok|auth_err|req|head|data|end|err
+	ID      string      `json:"id,omitempty"`      // request id (req/head/data/end/err)
+	Method  string      `json:"method,omitempty"`  // request method (req); defaults to POST
+	Path    string      `json:"path,omitempty"`    // request path (req)
+	Headers http.Header `json:"headers,omitempty"` // safe client headers (req)
+	Status  int         `json:"status,omitempty"`  // response status (head)
+	Ctype   string      `json:"ctype,omitempty"`   // response content-type (head)
+	B64     string      `json:"b64,omitempty"`     // response body chunk, base64 (data)
+	Msg     string      `json:"msg,omitempty"`     // error / auth message
+	Payload string      `json:"payload,omitempty"` // sealed {ts} for auth
 }
 
 func sendFrame(dc *webrtc.DataChannel, f frame) error {

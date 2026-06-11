@@ -137,6 +137,7 @@ struct ConnectionView: Codable, Identifiable {
     var redeemedAt: Int64
     var online: Bool
     var routing: Bool
+    var revoked: Bool // host permanently revoked this share
     var paused: Bool // host paused sharing (still online)
     var pausedReason: String // why the host is paused (e.g. usage limit), "" if not given
     var limitedProviders: [String] // providers the host auto-paused by reserve (partial or full)
@@ -164,6 +165,7 @@ struct ConnectionView: Codable, Identifiable {
         redeemedAt = try c.decodeIfPresent(Int64.self, forKey: .redeemedAt) ?? 0
         online = try c.decodeIfPresent(Bool.self, forKey: .online) ?? false
         routing = try c.decodeIfPresent(Bool.self, forKey: .routing) ?? false
+        revoked = try c.decodeIfPresent(Bool.self, forKey: .revoked) ?? false
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         pausedReason = try c.decodeIfPresent(String.self, forKey: .pausedReason) ?? ""
         limitedProviders = try c.decodeIfPresent([String].self, forKey: .limitedProviders) ?? []

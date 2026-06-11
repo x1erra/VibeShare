@@ -102,6 +102,12 @@ final class NotificationManager {
                      title: "\(name) paused sharing",
                      body: "Their models are unavailable until they resume.")
             }
+            if friendEventsEnabled, c.revoked, prev?.revoked == false {
+                post(key: "conn.revoked.\(c.id)",
+                     title: "\(name) revoked sharing",
+                     body: "This borrowed connection will no longer be used.",
+                     throttle: 0)
+            }
             if allotmentEnabled, c.hasLimit, let p = prev, p.hasLimit {
                 let was = Double(p.tokensUsed) / Double(p.tokenLimit)
                 let now = Double(c.tokensUsed) / Double(c.tokenLimit)
