@@ -14,6 +14,7 @@ src/Sources/Resources/cli-proxy-api-plus
 # App bundle
 VibeShare.app/
 *.zip
+*.dmg
 
 # macOS
 .DS_Store
