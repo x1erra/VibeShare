@@ -24,6 +24,7 @@ const (
 	maxRequestBodyBytes   = 32 << 20 // largest proxied request body (matches the front server)
 	maxInflightRequests   = 256      // most simultaneously-open request ids per guest session
 	maxConcurrentPerGrant = 8        // most requests proxied to the upstream at once, per grant
+	revokedPresenceTTL    = 7 * 24 * time.Hour
 )
 
 // allowedProxyPaths are the only upstream paths a guest may reach through a host.
@@ -100,6 +101,7 @@ type hostSession struct {
 type inboundReq struct {
 	method string
 	path   string
+	header http.Header
 	body   []byte
 }
 
@@ -148,20 +150,24 @@ func (h *HostManager) Reconcile() {
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	for id, g := range active {
 		if _, ok := h.grants[id]; !ok {
 			h.startGrant(g)
 		}
 	}
+	var stopped []*hostGrant
 	for id, hg := range h.grants {
 		if _, ok := active[id]; !ok {
-			hg.cancel()
-			h.nostr.RemoveRoom(hg.keys.roomID)
 			delete(h.grants, id)
+			stopped = append(stopped, hg)
 		}
 	}
+	h.mu.Unlock()
+
+	for _, hg := range stopped {
+		h.stopRevokedGrant(hg)
+	}
+	h.broadcastRevokedGrants()
 }
 
 // RefreshGrant recomputes a grant's shared models and re-broadcasts presence
@@ -476,6 +482,51 @@ func (h *HostManager) sendPresence(hg *hostGrant) {
 	h.nostr.Publish(hg.keys.roomID, "presence", content)
 }
 
+func (h *HostManager) stopRevokedGrant(hg *hostGrant) {
+	h.sendRevokedPresence(hg)
+	hg.cancel()
+	h.closeAllSessions(hg)
+	h.nostr.RemoveRoom(hg.keys.roomID)
+}
+
+func (h *HostManager) sendRevokedPresence(hg *hostGrant) {
+	h.publishRevokedPresence(hg.keys, 3)
+}
+
+func (h *HostManager) broadcastRevokedGrants() {
+	now := time.Now()
+	for _, g := range h.store.Grants() {
+		if !g.Revoked || g.RevokedAt == 0 {
+			continue
+		}
+		if now.Sub(time.Unix(g.RevokedAt, 0)) > revokedPresenceTTL {
+			continue
+		}
+		keys, err := deriveGrantKeys(g.Code)
+		if err != nil {
+			continue
+		}
+		h.publishRevokedPresence(keys, 1)
+	}
+}
+
+func (h *HostManager) publishRevokedPresence(keys grantKeys, count int) {
+	for i := 0; i < count; i++ {
+		content, err := sealJSON(keys.announceKey, presenceContent{
+			Role:    "host",
+			Name:    h.store.Config().IdentityName,
+			Revoked: true,
+			Paused:  true,
+			Reason:  "revoked this share",
+			TS:      time.Now().Unix(),
+		})
+		if err != nil {
+			return
+		}
+		h.nostr.Publish(keys.roomID, "presence", content)
+	}
+}
+
 func (h *HostManager) onEvent(hg *hostGrant, ev *nostr.Event) {
 	switch tagValue(ev, "t") {
 	case "presence":
@@ -613,6 +664,21 @@ func (h *HostManager) closeSession(hg *hostGrant, session string) {
 	}
 }
 
+func (h *HostManager) closeAllSessions(hg *hostGrant) {
+	hg.mu.Lock()
+	sessions := make([]*hostSession, 0, len(hg.sessions))
+	for id, hs := range hg.sessions {
+		delete(hg.sessions, id)
+		sessions = append(sessions, hs)
+	}
+	hg.mu.Unlock()
+	for _, hs := range sessions {
+		if hs.pc != nil {
+			_ = hs.pc.Close()
+		}
+	}
+}
+
 // grantActive reports whether a grant may accept NEW requests. False the instant the
 // grant is revoked (Reconcile cancels its ctx) or sharing is paused. It deliberately
 // does NOT cancel in-flight requests — proxyRequest streams off h.ctx — so a response
@@ -665,7 +731,7 @@ func (h *HostManager) onFrame(hg *hostGrant, hs *hostSession, data []byte) {
 			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "too many in-flight requests"})
 			return
 		}
-		hs.inbound[f.ID] = &inboundReq{method: f.Method, path: f.Path}
+		hs.inbound[f.ID] = &inboundReq{method: f.Method, path: f.Path, header: cloneForwardHeaders(f.Headers)}
 		hs.mu.Unlock()
 	case "reqdata":
 		chunk, err := base64.StdEncoding.DecodeString(f.B64)
@@ -696,14 +762,14 @@ func (h *HostManager) onFrame(hg *hostGrant, hs *hostSession, data []byte) {
 		}
 		select {
 		case hg.sem <- struct{}{}:
-			go h.proxyRequest(hg, hs, f.ID, ir.method, ir.path, ir.body)
+			go h.proxyRequest(hg, hs, f.ID, ir.method, ir.path, ir.header, ir.body)
 		default:
 			_ = sendFrame(dc, frame{T: "err", ID: f.ID, Msg: "host busy: too many concurrent requests, retry shortly"})
 		}
 	}
 }
 
-func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, path string, body []byte) {
+func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, path string, header http.Header, body []byte) {
 	defer func() { <-hg.sem }() // release the slot acquired in onFrame's "reqend"
 	dc := hs.channel()
 	if dc == nil {
@@ -773,7 +839,7 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 	ctx, cancel := context.WithCancel(h.ctx)
 	defer cancel()
 
-	resp, err := h.upstream.do(ctx, method, path, body)
+	resp, err := h.upstream.doWithHeaders(ctx, method, path, body, header)
 	if err != nil {
 		refuse("upstream error: " + err.Error())
 		return

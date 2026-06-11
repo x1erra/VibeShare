@@ -96,7 +96,8 @@ to also notarize and staple it for distribution to other Macs.
   `/v1/models`.
 - Need your quota back for a while? **Pause** a friend instead of revoking —
   the code stays valid and you can resume any time. **Revoke** kills the code
-  permanently.
+  permanently and marks it revoked on their Borrow tab when their app sees the
+  revoke notice.
 - The **Activity** tab shows every request routed through your shares (both
   directions) as it happens.
 
@@ -104,16 +105,24 @@ to also notarize and staple it for distribution to other Macs.
 
 - **Borrow** tab → **Enter code** with the code they gave you. Their models now
   resolve through your local endpoint automatically.
-- If several friends share the same model, requests stick to the friend who
-  served it last (keeps their provider-side prompt cache warm), prefer whoever
-  has the most allotment left, and automatically fail over to the next friend
-  if one is unreachable or out of budget.
+- If a friend revokes a code while you are online, VibeShare marks that borrowed
+  connection **revoked**, removes it from routing, and leaves the row so you can
+  remove it yourself. Hosts also re-announce recent revokes while running, so
+  borrowers who come online later can still learn about the revoke.
+- Your local model normally wins when you and a friend both have the same
+  model. For Claude/Codex models, if VibeShare knows your local 5-hour session
+  is exhausted and a non-exhausted friend shares that exact model, it routes to
+  the friend instead. If several friends share the same model, requests stick to
+  the friend who served it last (keeps their provider-side prompt cache warm),
+  prefer whoever has the most allotment left, and automatically fail over to the
+  next friend if one is unreachable or out of budget.
 
 ### Use with Claude Code
 
 Claude Code speaks the Anthropic Messages API (`/v1/messages`), which VibeShare
-routes the same way as the OpenAI path — local first, otherwise to an online
-friend who shares the model. Point Claude Code at the gateway:
+routes the same way as the OpenAI path — local first unless the local Claude
+session is known exhausted, otherwise to an online friend who shares the model.
+Point Claude Code at the gateway:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8788 ANTHROPIC_API_KEY=vibeshare claude

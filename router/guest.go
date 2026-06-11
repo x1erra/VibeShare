@@ -38,6 +38,7 @@ type guestConn struct {
 	mu          sync.Mutex
 	hostName    string
 	hostModels  []string
+	hostRevoked bool     // host permanently revoked this grant
 	hostPaused  bool     // host paused sharing (still online, advertising 0 models)
 	hostReason  string   // why the host is fully paused (e.g. session usage limit), if given
 	hostLimited []string // providers the host auto-paused by reserve (partial or full)
@@ -95,6 +96,9 @@ func newGuestManager(ctx context.Context, store *Store, nostr *NostrClient, noti
 func (g *GuestManager) Reconcile() {
 	want := map[string]Connection{}
 	for _, c := range g.store.Connections() {
+		if c.Revoked {
+			continue
+		}
 		want[c.ID] = c
 	}
 
@@ -154,6 +158,10 @@ func (g *GuestManager) sendPresence(gc *guestConn) {
 		return
 	}
 	gc.mu.Lock()
+	if gc.hostRevoked {
+		gc.mu.Unlock()
+		return
+	}
 	routing := gc.active > 0
 	gc.mu.Unlock()
 	content, err := sealJSON(gc.keys.announceKey, presenceContent{
@@ -180,14 +188,28 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 		}
 		gc.mu.Lock()
 		gc.hostName = pc.Name
-		gc.hostModels = pc.Models
-		gc.hostPaused = pc.Paused
+		gc.hostRevoked = pc.Revoked
+		if pc.Revoked {
+			gc.hostModels = nil
+			gc.hostPaused = true
+		} else {
+			gc.hostModels = pc.Models
+			gc.hostPaused = pc.Paused
+		}
 		gc.hostReason = pc.Reason
 		gc.hostLimited = pc.LimitedProviders
 		gc.tokenLimit = pc.TokenLimit
 		gc.tokensUsed = pc.TokensUsed
-		gc.lastSeen = time.Now().Unix()
+		if pc.Revoked {
+			gc.lastSeen = 0
+		} else {
+			gc.lastSeen = time.Now().Unix()
+		}
 		gc.mu.Unlock()
+		if pc.Revoked {
+			_ = g.store.MarkConnectionRevoked(gc.conn.ID)
+			go g.Reconcile()
+		}
 		g.notify()
 	case "signal":
 		var sc signalContent
@@ -225,16 +247,23 @@ type RemoteModel struct {
 // RemoteModels lists models reachable through currently-online hosts.
 func (g *GuestManager) RemoteModels() []RemoteModel {
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	conns := make([]*guestConn, 0, len(g.conns))
+	for _, gc := range g.conns {
+		conns = append(conns, gc)
+	}
+	g.mu.Unlock()
+	sortGuestConns(conns)
+
 	var out []RemoteModel
 	seen := map[string]bool{}
-	for _, gc := range g.conns {
+	for _, gc := range conns {
 		gc.mu.Lock()
 		online := time.Now().Unix()-gc.lastSeen < 60
+		revoked := gc.hostRevoked
 		name := gc.hostName
 		models := append([]string(nil), gc.hostModels...)
 		gc.mu.Unlock()
-		if !online {
+		if revoked || !online {
 			continue
 		}
 		for _, m := range models {
@@ -273,11 +302,14 @@ func (g *GuestManager) hostsForModel(model string) []*guestConn {
 		gc        *guestConn
 		bucket    int   // 0 sticky · 1 budget left · 2 exhausted
 		remaining int64 // -1 = unlimited
+		label     string
+		id        string
 	}
 	var cands []cand
 	for _, gc := range conns {
 		gc.mu.Lock()
 		online := time.Now().Unix()-gc.lastSeen < 60
+		revoked := gc.hostRevoked
 		has := false
 		for _, m := range gc.hostModels {
 			if m == model {
@@ -291,8 +323,12 @@ func (g *GuestManager) hostsForModel(model string) []*guestConn {
 			remaining = gc.tokenLimit - gc.tokensUsed
 		}
 		id := gc.conn.ID
+		label := gc.hostName
+		if label == "" {
+			label = gc.conn.Label
+		}
 		gc.mu.Unlock()
-		if !online || !has {
+		if revoked || !online || !has {
 			continue
 		}
 		bucket := 1
@@ -302,26 +338,49 @@ func (g *GuestManager) hostsForModel(model string) []*guestConn {
 		case id == sticky:
 			bucket = 0
 		}
-		cands = append(cands, cand{gc: gc, bucket: bucket, remaining: remaining})
+		cands = append(cands, cand{gc: gc, bucket: bucket, remaining: remaining, label: label, id: id})
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].bucket != cands[j].bucket {
 			return cands[i].bucket < cands[j].bucket
 		}
 		ri, rj := cands[i].remaining, cands[j].remaining
-		if ri == -1 {
-			return rj != -1 // unlimited first
+		if ri == -1 || rj == -1 {
+			if ri != rj {
+				return ri == -1 // unlimited first
+			}
+		} else if ri != rj {
+			return ri > rj // then most remaining
 		}
-		if rj == -1 {
-			return false
+		if cands[i].label != cands[j].label {
+			return cands[i].label < cands[j].label
 		}
-		return ri > rj // then most remaining
+		return cands[i].id < cands[j].id
 	})
 	out := make([]*guestConn, len(cands))
 	for i, c := range cands {
 		out[i] = c.gc
 	}
 	return out
+}
+
+func sortGuestConns(conns []*guestConn) {
+	sort.SliceStable(conns, func(i, j int) bool {
+		li, lj := connSortLabel(conns[i]), connSortLabel(conns[j])
+		if li != lj {
+			return li < lj
+		}
+		return conns[i].conn.ID < conns[j].conn.ID
+	})
+}
+
+func connSortLabel(gc *guestConn) string {
+	gc.mu.Lock()
+	defer gc.mu.Unlock()
+	if gc.hostName != "" {
+		return gc.hostName
+	}
+	return gc.conn.Label
 }
 
 // rememberHost pins future requests for model to the connection that just
@@ -347,6 +406,21 @@ func (g *GuestManager) CanRoute(model string) bool {
 	return len(g.hostsForModel(model)) > 0
 }
 
+// CanRouteWithBudget reports whether some online host advertises the model and
+// is not known to be out of its per-connection allotment. It is used only when
+// deciding whether to bypass a known-exhausted local Claude/Codex session.
+func (g *GuestManager) CanRouteWithBudget(model string) bool {
+	for _, gc := range g.hostsForModel(model) {
+		gc.mu.Lock()
+		ok := gc.tokenLimit == 0 || gc.tokensUsed < gc.tokenLimit
+		gc.mu.Unlock()
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // OnlineFriends reports how many friend connections are online, and how many of
 // those are advertising at least one model — used for clearer routing errors.
 func (g *GuestManager) OnlineFriends() (online, sharing int) {
@@ -355,9 +429,10 @@ func (g *GuestManager) OnlineFriends() (online, sharing int) {
 	for _, gc := range g.conns {
 		gc.mu.Lock()
 		isOnline := time.Now().Unix()-gc.lastSeen < 60
+		revoked := gc.hostRevoked
 		hasModels := len(gc.hostModels) > 0
 		gc.mu.Unlock()
-		if isOnline {
+		if isOnline && !revoked {
 			online++
 			if hasModels {
 				sharing++
@@ -375,7 +450,7 @@ const maxRouteAttempts = 3
 // streaming the response into w. When several friends share the model it tries
 // them best-first (see hostsForModel) and fails over to the next one as long
 // as nothing has been written to the client yet.
-func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path string, body []byte, w http.ResponseWriter) error {
+func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path string, headers http.Header, body []byte, w http.ResponseWriter) error {
 	hosts := g.hostsForModel(model)
 	if len(hosts) == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, errBody("no online friend shares model "+model))
@@ -387,7 +462,7 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 
 	var lastErr error
 	for i, gc := range hosts {
-		committed, err := g.routeVia(ctx, gc, model, method, path, body, w)
+		committed, err := g.routeVia(ctx, gc, model, method, path, headers, body, w)
 		if err == nil {
 			return nil
 		}
@@ -411,7 +486,7 @@ func (g *GuestManager) RouteRequest(ctx context.Context, model, method, path str
 // response bytes (status/body) were already written to w — once true the caller
 // must not retry elsewhere. Every attempt that targets a host lands in the
 // activity feed with its outcome; usage is only tallied once a response starts.
-func (g *GuestManager) routeVia(ctx context.Context, gc *guestConn, model, method, path string, body []byte, w http.ResponseWriter) (committed bool, retErr error) {
+func (g *GuestManager) routeVia(ctx context.Context, gc *guestConn, model, method, path string, headers http.Header, body []byte, w http.ResponseWriter) (committed bool, retErr error) {
 	started := time.Now()
 	var tracker *usageTracker
 	defer func() {
@@ -461,7 +536,7 @@ func (g *GuestManager) routeVia(ctx context.Context, gc *guestConn, model, metho
 		g.notify()
 	}()
 
-	if err := g.sendRequest(s, id, method, path, body); err != nil {
+	if err := g.sendRequest(s, id, method, path, headers, body); err != nil {
 		return false, errors.New("failed to send request to friend: " + err.Error())
 	}
 
@@ -534,8 +609,11 @@ func (g *GuestManager) routeVia(ctx context.Context, gc *guestConn, model, metho
 // sendRequest streams the request to the host as a `req` frame followed by
 // base64 body chunks (so arbitrarily large bodies — Claude Code's system prompt
 // + tools easily exceed the data channel's per-message limit) and a `reqend`.
-func (g *GuestManager) sendRequest(s *guestSession, id, method, path string, body []byte) error {
-	if err := sendFrame(s.dc, frame{T: "req", ID: id, Method: method, Path: path}); err != nil {
+func (g *GuestManager) sendRequest(s *guestSession, id, method, path string, headers http.Header, body []byte) error {
+	if err := sendFrame(s.dc, frame{
+		T: "req", ID: id, Method: method, Path: path,
+		Headers: cloneForwardHeaders(headers),
+	}); err != nil {
 		return err
 	}
 	const chunk = 16 * 1024
@@ -722,6 +800,7 @@ func (s *guestSession) isClosed() bool {
 type ConnStatus struct {
 	Online           bool     `json:"online"`
 	Routing          bool     `json:"routing"`
+	Revoked          bool     `json:"revoked"`
 	Paused           bool     `json:"paused"`                     // host paused sharing (still online)
 	PausedReason     string   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
 	LimitedProviders []string `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve (partial or full)
@@ -750,8 +829,9 @@ func (g *GuestManager) Status(connID string) ConnStatus {
 	}
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
-	st.Online = time.Now().Unix()-gc.lastSeen < 60
-	st.Routing = gc.active > 0
+	st.Revoked = gc.hostRevoked
+	st.Online = !gc.hostRevoked && time.Now().Unix()-gc.lastSeen < 60
+	st.Routing = !gc.hostRevoked && gc.active > 0
 	st.Paused = gc.hostPaused
 	st.PausedReason = gc.hostReason
 	st.LimitedProviders = append([]string(nil), gc.hostLimited...)

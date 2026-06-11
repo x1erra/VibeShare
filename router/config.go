@@ -14,6 +14,10 @@ import (
 // silent success.
 var errGrantNotFound = errors.New("grant not found")
 
+// errConnectionExists prevents the same bearer code from being redeemed more
+// than once, which would otherwise create duplicate routing candidates.
+var errConnectionExists = errors.New("connection already exists")
+
 // defaultNostrRelays are public Nostr relays used purely for signaling and
 // encrypted presence. They never see plaintext.
 var defaultNostrRelays = []string{
@@ -69,6 +73,7 @@ type Grant struct {
 	TokenLimit int64    `json:"tokenLimit"` // 0 = unlimited; max total (input+output) tokens this friend may use
 	CreatedAt  int64    `json:"createdAt"`
 	Revoked    bool     `json:"revoked"`
+	RevokedAt  int64    `json:"revokedAt,omitempty"`
 	Paused     bool     `json:"paused"` // temporarily stop serving without killing the code
 }
 
@@ -78,6 +83,7 @@ type Connection struct {
 	Label      string `json:"label"` // host/friend label
 	Code       string `json:"code"`  // redeemed grant code — secret
 	RedeemedAt int64  `json:"redeemedAt"`
+	Revoked    bool   `json:"revoked"` // host announced the grant was permanently revoked
 }
 
 // Usage is the persisted lifetime usage for one grant (host side) or connection
@@ -212,6 +218,9 @@ func (s *Store) RevokeGrant(id string) error {
 	for i := range s.grants {
 		if s.grants[i].ID == id {
 			s.grants[i].Revoked = true
+			if s.grants[i].RevokedAt == 0 {
+				s.grants[i].RevokedAt = time.Now().Unix()
+			}
 			found = true
 		}
 	}
@@ -312,8 +321,15 @@ func (s *Store) Connections() []Connection {
 }
 
 func (s *Store) AddConnection(c Connection) error {
+	c.Code = normalizeCode(c.Code)
 	s.mu.Lock()
 	old := append([]Connection(nil), s.connections...)
+	for _, existing := range s.connections {
+		if normalizeCode(existing.Code) == c.Code {
+			s.mu.Unlock()
+			return errConnectionExists
+		}
+	}
 	s.connections = append(s.connections, c)
 	err := saveJSON(filepath.Join(s.dir, "connections.json"), s.connections)
 	if err != nil {
@@ -333,6 +349,30 @@ func (s *Store) RemoveConnection(id string) error {
 		}
 	}
 	s.connections = out
+	err := saveJSON(filepath.Join(s.dir, "connections.json"), s.connections)
+	if err != nil {
+		s.connections = old
+	}
+	s.mu.Unlock()
+	return err
+}
+
+// MarkConnectionRevoked records a host-side revoke notice for a borrowed code.
+// The user still owns the row locally and can remove it from the Borrow tab.
+func (s *Store) MarkConnectionRevoked(id string) error {
+	s.mu.Lock()
+	old := append([]Connection(nil), s.connections...)
+	found := false
+	for i := range s.connections {
+		if s.connections[i].ID == id {
+			s.connections[i].Revoked = true
+			found = true
+		}
+	}
+	if !found {
+		s.mu.Unlock()
+		return nil
+	}
 	err := saveJSON(filepath.Join(s.dir, "connections.json"), s.connections)
 	if err != nil {
 		s.connections = old

@@ -43,7 +43,9 @@ struct ConnectionRow: View {
                 Text(displayName).font(.subheadline).bold()
                 Spacer()
                 if connection.routing { Badge(text: "routing", color: .blue) }
-                if connection.paused && connection.online {
+                if connection.revoked {
+                    Badge(text: "revoked", color: .red)
+                } else if connection.paused && connection.online {
                     Badge(text: "paused", color: .orange)
                 } else {
                     Badge(text: connection.online ? "online" : "offline",
@@ -54,7 +56,10 @@ struct ConnectionRow: View {
                     }
                 }
             }
-            if connection.paused && connection.online {
+            if connection.revoked {
+                Text("\(displayName) revoked this share. It will not be used for routing; remove it when you're done.")
+                    .font(.caption2).foregroundStyle(.red)
+            } else if connection.paused && connection.online {
                 Text(connection.pausedReason.isEmpty
                      ? "\(displayName) paused sharing — their models are hidden until they resume."
                      : "\(displayName) \(connection.pausedReason)")
@@ -70,11 +75,11 @@ struct ConnectionRow: View {
             }
             // Partial limit: friend is online with some models, but a provider is
             // auto-paused by their reserve. (Full pause shows above via `paused`.)
-            if connection.online, !connection.paused, !connection.limitedProviders.isEmpty {
+            if connection.online, !connection.revoked, !connection.paused, !connection.limitedProviders.isEmpty {
                 Text("\(connection.limitedProviders.joined(separator: " & ")) paused (their session limit) — other models still available.")
                     .font(.caption2).foregroundStyle(.orange)
             }
-            if connection.hasLimit {
+            if !connection.revoked, connection.hasLimit {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Image(systemName: "chart.bar.fill").font(.caption2)
