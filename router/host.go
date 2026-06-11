@@ -47,6 +47,7 @@ var providerModelHints = map[string][]string{
 	"github-copilot": {"copilot"},
 	"antigravity":    {"gemini", "antigravity"},
 	"zai":            {"glm"},
+	"xai":            {"grok"},
 }
 
 // HostManager runs the host side of every active grant.
@@ -803,23 +804,29 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 		h.notify()
 	}()
 
-	_ = sendFrame(dc, frame{
+	if err := sendFrame(dc, frame{
 		T:      "head",
 		ID:     id,
 		Status: resp.StatusCode,
 		Ctype:  resp.Header.Get("Content-Type"),
-	})
+	}); err != nil {
+		streamErr = "data channel write failed: " + err.Error()
+		return
+	}
 
 	buf := make([]byte, 8*1024)
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
 			tracker.Write(buf[:n])
-			_ = sendFrame(dc, frame{
+			if err := sendFrame(dc, frame{
 				T:   "data",
 				ID:  id,
 				B64: base64.StdEncoding.EncodeToString(buf[:n]),
-			})
+			}); err != nil {
+				streamErr = "data channel write failed: " + err.Error()
+				return
+			}
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
@@ -830,7 +837,9 @@ func (h *HostManager) proxyRequest(hg *hostGrant, hs *hostSession, id, method, p
 			break
 		}
 	}
-	_ = sendFrame(dc, frame{T: "end", ID: id})
+	if err := sendFrame(dc, frame{T: "end", ID: id}); err != nil {
+		streamErr = "data channel write failed: " + err.Error()
+	}
 }
 
 func (h *HostManager) grantAllowsModel(hg *hostGrant, model string) bool {

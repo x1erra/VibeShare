@@ -24,7 +24,7 @@ enum ProviderCatalog {
         ProviderInfo(key: "kimi", name: "Kimi (Moonshot)", loginFlag: "-kimi-login",
                      symbol: "moon.stars", modelHints: ["kimi", "moonshot"]),
         ProviderInfo(key: "antigravity", name: "Antigravity", loginFlag: "-antigravity-login",
-                     symbol: "arrow.up.forward.app", modelHints: ["antigravity"]),
+                     symbol: "arrow.up.forward.app", modelHints: ["gemini", "antigravity"]),
         ProviderInfo(key: "xai", name: "xAI / Grok", loginFlag: "-xai-login",
                      symbol: "x.circle", modelHints: ["grok"]),
     ]
@@ -58,8 +58,17 @@ final class ProviderManager: ObservableObject {
         let dir = AppPaths.providerAuthDir
         let items = (try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil)) ?? []
-        return items.filter {
-            $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix(provider.key + "-")
+        let prefixes = authPrefixes(provider)
+        return items.filter { item in
+            item.pathExtension == "json" &&
+                prefixes.contains { item.lastPathComponent.hasPrefix($0 + "-") }
+        }
+    }
+
+    private func authPrefixes(_ provider: ProviderInfo) -> [String] {
+        switch provider.key {
+        case "codex": return ["codex", "chatgpt"]
+        default: return [provider.key]
         }
     }
 

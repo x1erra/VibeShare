@@ -57,7 +57,9 @@ func main() {
 			cfg.NostrRelays = list
 		}
 	}
-	_ = store.SetConfig(cfg)
+	if err := store.SetConfig(cfg); err != nil {
+		log.Printf("store: save config: %v", err)
+	}
 	cfg = store.Config()
 
 	ctx, cancel := context.WithCancel(context.Background())

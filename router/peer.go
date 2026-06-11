@@ -53,7 +53,6 @@ type frame struct {
 	ID      string `json:"id,omitempty"`      // request id (req/head/data/end/err)
 	Method  string `json:"method,omitempty"`  // request method (req); defaults to POST
 	Path    string `json:"path,omitempty"`    // request path (req)
-	Body    string `json:"body,omitempty"`    // request body JSON (req)
 	Status  int    `json:"status,omitempty"`  // response status (head)
 	Ctype   string `json:"ctype,omitempty"`   // response content-type (head)
 	B64     string `json:"b64,omitempty"`     // response body chunk, base64 (data)
