@@ -252,6 +252,6 @@ struct SettingsTab: View {
                 .controlSize(.small)
                 .help("Restarts both bundled engines (router + provider)")
         }
-        Text("VibeShare 0.1.0").font(.caption2).foregroundStyle(.secondary)
+        Text("VibeShare 1.0").font(.caption2).foregroundStyle(.secondary)
     }
 }
