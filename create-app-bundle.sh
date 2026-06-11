@@ -79,7 +79,7 @@ cp "$SRC_DIR/Info.plist" "$APP_DIR/Contents/"
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
 
 # Inject version.
-VERSION="${APP_VERSION:-$(git -C "$PROJECT_DIR" describe --tags --abbrev=0 2>/dev/null || echo 0.1.0)}"
+VERSION="${APP_VERSION:-$(git -C "$PROJECT_DIR" describe --tags --abbrev=0 2>/dev/null || echo 1.0)}"
 VERSION="${VERSION#v}"
 BUILD_NUMBER="$(git -C "$PROJECT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
