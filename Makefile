@@ -1,4 +1,4 @@
-.PHONY: help router swift build app install run clean test fetch-provider
+.PHONY: help router swift build app universal dmg universal-dmg install run clean test fetch-provider
 
 GO ?= $(shell command -v go || echo /opt/homebrew/bin/go)
 
@@ -28,6 +28,12 @@ app: ## Build and assemble VibeShare.app (release, signed, this machine's arch)
 universal: ## Build a universal VibeShare.app (runs on Intel AND Apple Silicon)
 	@UNIVERSAL=1 ./create-app-bundle.sh
 
+dmg: ## Build VibeShare.app and package a distributable VibeShare-<version>.dmg
+	@./create-dmg.sh
+
+universal-dmg: ## Package a universal VibeShare.app into a .dmg (Intel + Apple Silicon)
+	@UNIVERSAL=1 ./create-dmg.sh
+
 install: app ## Build and install to /Applications
 	@rm -rf "/Applications/VibeShare.app"
 	@cp -R "VibeShare.app" /Applications/
@@ -41,5 +47,5 @@ test: ## Test the Go router
 	@echo "✅ go tests clean"
 
 clean: ## Remove build artifacts and bundled router binary
-	@rm -rf src/.build router/vibeshare-router src/Sources/Resources/vibeshare-router "VibeShare.app"
+	@rm -rf src/.build router/vibeshare-router src/Sources/Resources/vibeshare-router "VibeShare.app" VibeShare-*.dmg
 	@echo "✅ cleaned"

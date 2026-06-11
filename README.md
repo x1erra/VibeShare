@@ -63,10 +63,19 @@ make swift
 # 2b. …or build a distributable, signed VibeShare.app
 make app
 open VibeShare.app
+
+# 2c. …or package a distributable disk image (VibeShare-<version>.dmg)
+make dmg                          # this machine's arch
+make universal-dmg               # Intel + Apple Silicon
 ```
 
 `make install` copies it to `/Applications`. Without a Developer ID it is
 ad-hoc signed (fine locally; right-click → Open the first time).
+
+`make dmg` builds the app and wraps it in a drag-to-install disk image (app
+next to an `Applications` shortcut). With a Developer ID it signs the image;
+set `NOTARIZE=1` (plus `NOTARY_PROFILE`, or `APPLE_ID`/`TEAM_ID`/`APP_PASSWORD`)
+to also notarize and staple it for distribution to other Macs.
 
 ## Using it
 
