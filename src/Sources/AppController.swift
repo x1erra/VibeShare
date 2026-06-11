@@ -196,10 +196,8 @@ final class AppController: ObservableObject {
     }
 
     func setIdentityName(_ name: String) async -> Bool {
-        guard var cfg = try? await client.config() else { return false }
-        cfg.identityName = name
         do {
-            try await client.updateConfig(cfg)
+            try await client.updateConfig(RouterConfigUpdate(identityName: name))
         } catch {
             softError = error.localizedDescription
             return false
@@ -209,9 +207,11 @@ final class AppController: ObservableObject {
     }
 
     func setSharingEnabled(_ enabled: Bool) async {
-        guard var cfg = try? await client.config() else { return }
-        cfg.enableSharing = enabled
-        try? await client.updateConfig(cfg)
+        do {
+            try await client.updateConfig(RouterConfigUpdate(enableSharing: enabled))
+        } catch {
+            softError = error.localizedDescription
+        }
         await refresh()
     }
 
@@ -230,20 +230,21 @@ final class AppController: ObservableObject {
     /// sharing a provider's models once that provider's 5-hour session window
     /// passes `100 - percent`, keeping `percent`% of each subscription in reserve.
     func setUsageReserve(enabled: Bool, percent: Int) async {
-        guard var cfg = try? await client.config() else { return }
-        cfg.autoStopSharing = enabled
-        cfg.usageReservePercent = percent
-        try? await client.updateConfig(cfg)
+        do {
+            try await client.updateConfig(RouterConfigUpdate(
+                autoStopSharing: enabled,
+                usageReservePercent: percent))
+        } catch {
+            softError = error.localizedDescription
+        }
         await refresh()
     }
 
     /// Replace the signaling relay set. Relays are read at router start, so the
     /// router is restarted afterwards (the UI shows it reconnecting).
     func setRelays(_ relays: [String]) async -> Bool {
-        guard var cfg = try? await client.config() else { return false }
-        cfg.nostrRelays = relays
         do {
-            try await client.updateConfig(cfg)
+            try await client.updateConfig(RouterConfigUpdate(nostrRelays: relays))
         } catch {
             softError = error.localizedDescription
             return false

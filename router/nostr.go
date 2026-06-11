@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,25 +22,25 @@ type NostrClient struct {
 	sk   string
 	pk   string
 
-	mu      sync.Mutex
-	relays  map[string]*nostr.Relay       // url -> connected relay
-	rooms   map[string]func(*nostr.Event) // roomID -> handler
-	subKeys map[string]bool               // "url|room" -> subscribed
-	seen    map[string]bool               // event id dedupe
-	ctx     context.Context
+	mu     sync.Mutex
+	relays map[string]*nostr.Relay        // url -> connected relay
+	rooms  map[string]func(*nostr.Event)  // roomID -> handler
+	subs   map[string]*nostr.Subscription // "url|room" -> active subscription, nil while connecting
+	seen   map[string]bool                // event id dedupe
+	ctx    context.Context
 }
 
 func newNostrClient(urls []string) *NostrClient {
 	sk := nostr.GeneratePrivateKey()
 	pk, _ := nostr.GetPublicKey(sk)
 	return &NostrClient{
-		urls:    urls,
-		sk:      sk,
-		pk:      pk,
-		relays:  map[string]*nostr.Relay{},
-		rooms:   map[string]func(*nostr.Event){},
-		subKeys: map[string]bool{},
-		seen:    map[string]bool{},
+		urls:   urls,
+		sk:     sk,
+		pk:     pk,
+		relays: map[string]*nostr.Relay{},
+		rooms:  map[string]func(*nostr.Event){},
+		subs:   map[string]*nostr.Subscription{},
+		seen:   map[string]bool{},
 	}
 }
 
@@ -75,17 +76,23 @@ func (n *NostrClient) AddRoom(roomID string, handler func(*nostr.Event)) {
 	}
 }
 
-// RemoveRoom stops handling a room. Existing subscriptions simply stop being
-// re-created; the relay closes them when the client goes away.
+// RemoveRoom stops handling a room and closes any live relay subscriptions.
 func (n *NostrClient) RemoveRoom(roomID string) {
+	var toClose []*nostr.Subscription
 	n.mu.Lock()
 	delete(n.rooms, roomID)
-	for k := range n.subKeys {
-		if len(k) > len(roomID) && k[len(k)-len(roomID):] == roomID {
-			delete(n.subKeys, k)
+	for k, sub := range n.subs {
+		if strings.HasSuffix(k, "|"+roomID) {
+			delete(n.subs, k)
+			if sub != nil {
+				toClose = append(toClose, sub)
+			}
 		}
 	}
 	n.mu.Unlock()
+	for _, sub := range toClose {
+		sub.Unsub()
+	}
 }
 
 // Publish seals nothing — callers pass already-encrypted content. It signs and
@@ -167,13 +174,13 @@ func (n *NostrClient) reconnectAll() {
 }
 
 func (n *NostrClient) ensureSub(url string, relay *nostr.Relay, roomID string, handler func(*nostr.Event)) {
-	key := url + "|" + roomID
+	key := subKey(url, roomID)
 	n.mu.Lock()
-	if n.subKeys[key] {
+	if _, ok := n.subs[key]; ok {
 		n.mu.Unlock()
 		return
 	}
-	n.subKeys[key] = true
+	n.subs[key] = nil
 	n.mu.Unlock()
 
 	since := nostr.Timestamp(time.Now().Add(-30 * time.Second).Unix())
@@ -186,17 +193,29 @@ func (n *NostrClient) ensureSub(url string, relay *nostr.Relay, roomID string, h
 	sub, err := relay.Subscribe(n.ctx, filters)
 	if err != nil {
 		n.mu.Lock()
-		delete(n.subKeys, key)
+		delete(n.subs, key)
 		n.mu.Unlock()
 		return
 	}
 
+	n.mu.Lock()
+	if _, ok := n.subs[key]; !ok {
+		n.mu.Unlock()
+		sub.Unsub()
+		return
+	}
+	n.subs[key] = sub
+	n.mu.Unlock()
+
 	go func() {
 		defer func() {
-			// Relay/subscription died — drop it so maintain() reconnects.
 			n.mu.Lock()
-			delete(n.subKeys, key)
-			delete(n.relays, url)
+			if n.subs[key] == sub {
+				// Relay/subscription died unexpectedly — drop it so maintain()
+				// reconnects and re-subscribes active rooms.
+				delete(n.subs, key)
+				delete(n.relays, url)
+			}
 			n.mu.Unlock()
 		}()
 		for {
@@ -223,6 +242,10 @@ func (n *NostrClient) ensureSub(url string, relay *nostr.Relay, roomID string, h
 			}
 		}
 	}()
+}
+
+func subKey(url, roomID string) string {
+	return url + "|" + roomID
 }
 
 func (n *NostrClient) markSeen(id string) bool {
