@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -139,7 +140,9 @@ func loadJSON(path string, out any) {
 	if err != nil {
 		return
 	}
-	_ = json.Unmarshal(data, out)
+	if err := json.Unmarshal(data, out); err != nil {
+		log.Printf("store: ignoring invalid %s: %v", path, err)
+	}
 }
 
 func saveJSON(path string, v any) error {
@@ -162,9 +165,14 @@ func (s *Store) Config() Config {
 
 func (s *Store) SetConfig(c Config) error {
 	s.mu.Lock()
+	old := s.config
 	s.config = c
+	err := saveJSON(filepath.Join(s.dir, "config.json"), c)
+	if err != nil {
+		s.config = old
+	}
 	s.mu.Unlock()
-	return saveJSON(filepath.Join(s.dir, "config.json"), c)
+	return err
 }
 
 func (s *Store) Grants() []Grant {
@@ -187,22 +195,36 @@ func (s *Store) ActiveGrants() []Grant {
 
 func (s *Store) AddGrant(g Grant) error {
 	s.mu.Lock()
+	old := append([]Grant(nil), s.grants...)
 	s.grants = append(s.grants, g)
-	grants := append([]Grant(nil), s.grants...)
+	err := saveJSON(filepath.Join(s.dir, "grants.json"), s.grants)
+	if err != nil {
+		s.grants = old
+	}
 	s.mu.Unlock()
-	return saveJSON(filepath.Join(s.dir, "grants.json"), grants)
+	return err
 }
 
 func (s *Store) RevokeGrant(id string) error {
 	s.mu.Lock()
+	old := append([]Grant(nil), s.grants...)
+	found := false
 	for i := range s.grants {
 		if s.grants[i].ID == id {
 			s.grants[i].Revoked = true
+			found = true
 		}
 	}
-	grants := append([]Grant(nil), s.grants...)
+	if !found {
+		s.mu.Unlock()
+		return errGrantNotFound
+	}
+	err := saveJSON(filepath.Join(s.dir, "grants.json"), s.grants)
+	if err != nil {
+		s.grants = old
+	}
 	s.mu.Unlock()
-	return saveJSON(filepath.Join(s.dir, "grants.json"), grants)
+	return err
 }
 
 // GrantLimit returns the token allotment for a grant (0 = unlimited). Read live
@@ -236,6 +258,7 @@ func (s *Store) GrantPaused(id string) bool {
 // serving requests while paused) and persists it.
 func (s *Store) SetGrantPaused(id string, paused bool) error {
 	s.mu.Lock()
+	old := append([]Grant(nil), s.grants...)
 	found := false
 	for i := range s.grants {
 		if s.grants[i].ID == id {
@@ -243,12 +266,16 @@ func (s *Store) SetGrantPaused(id string, paused bool) error {
 			found = true
 		}
 	}
-	grants := append([]Grant(nil), s.grants...)
-	s.mu.Unlock()
 	if !found {
+		s.mu.Unlock()
 		return errGrantNotFound
 	}
-	return saveJSON(filepath.Join(s.dir, "grants.json"), grants)
+	err := saveJSON(filepath.Join(s.dir, "grants.json"), s.grants)
+	if err != nil {
+		s.grants = old
+	}
+	s.mu.Unlock()
+	return err
 }
 
 // SetGrantLimit updates a grant's token allotment (host can raise/lower or
@@ -258,6 +285,7 @@ func (s *Store) SetGrantLimit(id string, limit int64) error {
 		limit = 0
 	}
 	s.mu.Lock()
+	old := append([]Grant(nil), s.grants...)
 	found := false
 	for i := range s.grants {
 		if s.grants[i].ID == id {
@@ -265,12 +293,16 @@ func (s *Store) SetGrantLimit(id string, limit int64) error {
 			found = true
 		}
 	}
-	grants := append([]Grant(nil), s.grants...)
-	s.mu.Unlock()
 	if !found {
+		s.mu.Unlock()
 		return errGrantNotFound
 	}
-	return saveJSON(filepath.Join(s.dir, "grants.json"), grants)
+	err := saveJSON(filepath.Join(s.dir, "grants.json"), s.grants)
+	if err != nil {
+		s.grants = old
+	}
+	s.mu.Unlock()
+	return err
 }
 
 func (s *Store) Connections() []Connection {
@@ -281,14 +313,19 @@ func (s *Store) Connections() []Connection {
 
 func (s *Store) AddConnection(c Connection) error {
 	s.mu.Lock()
+	old := append([]Connection(nil), s.connections...)
 	s.connections = append(s.connections, c)
-	conns := append([]Connection(nil), s.connections...)
+	err := saveJSON(filepath.Join(s.dir, "connections.json"), s.connections)
+	if err != nil {
+		s.connections = old
+	}
 	s.mu.Unlock()
-	return saveJSON(filepath.Join(s.dir, "connections.json"), conns)
+	return err
 }
 
 func (s *Store) RemoveConnection(id string) error {
 	s.mu.Lock()
+	old := append([]Connection(nil), s.connections...)
 	out := s.connections[:0]
 	for _, c := range s.connections {
 		if c.ID != id {
@@ -296,9 +333,12 @@ func (s *Store) RemoveConnection(id string) error {
 		}
 	}
 	s.connections = out
-	conns := append([]Connection(nil), s.connections...)
+	err := saveJSON(filepath.Join(s.dir, "connections.json"), s.connections)
+	if err != nil {
+		s.connections = old
+	}
 	s.mu.Unlock()
-	return saveJSON(filepath.Join(s.dir, "connections.json"), conns)
+	return err
 }
 
 // Usage returns the persisted lifetime usage for an id (grant or connection).
@@ -315,16 +355,20 @@ func (s *Store) AddUsage(id string, reqs, inTok, outTok int64) {
 	if s.usage == nil {
 		s.usage = map[string]Usage{}
 	}
-	u := s.usage[id]
+	old, hadOld := s.usage[id]
+	u := old
 	u.Requests += reqs
 	u.InputTokens += inTok
 	u.OutputTokens += outTok
 	u.LastUsed = time.Now().Unix()
 	s.usage[id] = u
-	snapshot := make(map[string]Usage, len(s.usage))
-	for k, v := range s.usage {
-		snapshot[k] = v
+	if err := saveJSON(filepath.Join(s.dir, "usage.json"), s.usage); err != nil {
+		if hadOld {
+			s.usage[id] = old
+		} else {
+			delete(s.usage, id)
+		}
+		log.Printf("store: save usage: %v", err)
 	}
 	s.mu.Unlock()
-	_ = saveJSON(filepath.Join(s.dir, "usage.json"), snapshot)
 }

@@ -288,11 +288,6 @@ final class AppController: ObservableObject {
         endpointBase + "/v1"
     }
 
-    func copyEndpoint() {
-        copyToPasteboard(endpointURL)
-        markToolSetupSeen()
-    }
-
     func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)

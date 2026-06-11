@@ -248,7 +248,11 @@ func (c *ControlServer) updateGrant(w http.ResponseWriter, r *http.Request) {
 func (c *ControlServer) deleteGrant(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := c.store.RevokeGrant(id); err != nil {
-		http.Error(w, "save failed", http.StatusInternalServerError)
+		if errors.Is(err, errGrantNotFound) {
+			http.Error(w, "grant not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "save failed", http.StatusInternalServerError)
+		}
 		return
 	}
 	c.host.Reconcile()

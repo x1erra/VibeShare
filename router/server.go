@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -95,8 +96,12 @@ func (s *FrontServer) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *FrontServer) handleCompletion(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	body, err := readLimitedBody(r.Body, maxRequestBodyBytes)
 	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, errBody("request body too large"))
+			return
+		}
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
@@ -141,14 +146,23 @@ func (s *FrontServer) handleCompletion(w http.ResponseWriter, r *http.Request) {
 func (s *FrontServer) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	if r.Body != nil {
-		body, _ = io.ReadAll(io.LimitReader(r.Body, 32<<20))
+		var err error
+		body, err = readLimitedBody(r.Body, maxRequestBodyBytes)
+		if err != nil {
+			if errors.Is(err, errRequestBodyTooLarge) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, errBody("request body too large"))
+				return
+			}
+			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
 	}
 	s.forwardLocal(w, r, body)
 }
 
 // forwardLocal streams a request through to the local cli-proxy-api.
 func (s *FrontServer) forwardLocal(w http.ResponseWriter, r *http.Request, body []byte) {
-	resp, err := s.upstream.do(r.Context(), r.Method, r.URL.Path, body)
+	resp, err := s.upstream.do(r.Context(), r.Method, r.URL.RequestURI(), body)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error": map[string]any{
@@ -186,6 +200,22 @@ func (s *FrontServer) forwardLocal(w http.ResponseWriter, r *http.Request, body 
 // errBody builds an error envelope clients understand (OpenAI/Anthropic shape).
 func errBody(msg string) map[string]any {
 	return map[string]any{"error": map[string]any{"message": msg, "type": "vibeshare_error"}}
+}
+
+var errRequestBodyTooLarge = errors.New("request body too large")
+
+func readLimitedBody(r io.Reader, limit int) ([]byte, error) {
+	if r == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > limit {
+		return nil, errRequestBodyTooLarge
+	}
+	return body, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

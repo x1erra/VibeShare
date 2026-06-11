@@ -8,8 +8,6 @@ import Combine
 final class ProcessManager: ObservableObject {
     static let shared = ProcessManager()
 
-    @Published private(set) var providerRunning = false
-    @Published private(set) var routerRunning = false
     @Published private(set) var lastError: String?
 
     private var providerProcess: Process?
@@ -34,17 +32,12 @@ final class ProcessManager: ObservableObject {
         }
     }
 
-    /// Kills leftover VibeShare children from a prior run (matched narrowly so we
-    /// never touch an unrelated cli-proxy-api install).
+    /// Kills leftover VibeShare children from a prior run. PID files avoid broad
+    /// process-name matching; the command line is still checked before killing in
+    /// case the OS reused the PID.
     private func reapStale() {
-        let markers = ["vibeshare-router", AppPaths.providerConfigPath().path]
-        for marker in markers {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            p.arguments = ["-f", marker]
-            try? p.run()
-            p.waitUntilExit()
-        }
+        reapStale(.router)
+        reapStale(.provider)
     }
 
     func stopAll() {
@@ -52,12 +45,10 @@ final class ProcessManager: ObservableObject {
             self.stopping = true
             self.kill(self.routerProcess); self.routerProcess = nil
             try? self.routerLog?.close(); self.routerLog = nil
+            self.removePID(.router)
             self.kill(self.providerProcess); self.providerProcess = nil
             try? self.providerLog?.close(); self.providerLog = nil
-        }
-        DispatchQueue.main.async {
-            self.routerRunning = false
-            self.providerRunning = false
+            self.removePID(.provider)
         }
     }
 
@@ -68,11 +59,11 @@ final class ProcessManager: ObservableObject {
             self.stopping = true
             self.kill(self.routerProcess); self.routerProcess = nil
             try? self.routerLog?.close(); self.routerLog = nil
+            self.removePID(.router)
             self.kill(self.providerProcess); self.providerProcess = nil
             try? self.providerLog?.close(); self.providerLog = nil
+            self.removePID(.provider)
             DispatchQueue.main.async {
-                self.routerRunning = false
-                self.providerRunning = false
                 self.lastError = nil
             }
             self.stopping = false
@@ -88,7 +79,7 @@ final class ProcessManager: ObservableObject {
             self.stopping = true
             self.kill(self.routerProcess); self.routerProcess = nil
             try? self.routerLog?.close(); self.routerLog = nil
-            DispatchQueue.main.async { self.routerRunning = false }
+            self.removePID(.router)
             self.stopping = false
             self.startRouter()
         }
@@ -124,7 +115,7 @@ final class ProcessManager: ObservableObject {
             try proc.run()
             providerProcess = proc
             providerStartedAt = Date()
-            DispatchQueue.main.async { self.providerRunning = true }
+            writePID(proc.processIdentifier, .provider)
         } catch {
             setError("Failed to start cli-proxy-api: \(error.localizedDescription)")
         }
@@ -140,6 +131,7 @@ final class ProcessManager: ObservableObject {
         proc.executableURL = bin
         proc.arguments = [
             "-store", AppPaths.stateDir.path,
+            "-control-port", "8799",
             "-parent-pid", String(ProcessInfo.processInfo.processIdentifier),
         ]
         routerLog = attachLog(proc, name: "router.log")
@@ -148,27 +140,43 @@ final class ProcessManager: ObservableObject {
             try proc.run()
             routerProcess = proc
             routerStartedAt = Date()
-            DispatchQueue.main.async { self.routerRunning = true }
+            writePID(proc.processIdentifier, .router)
         } catch {
             setError("Failed to start router: \(error.localizedDescription)")
         }
     }
 
-    private enum Child { case provider, router }
+    private enum Child {
+        case provider, router
+
+        var pidFileName: String {
+            switch self {
+            case .provider: return "cli-proxy.pid"
+            case .router: return "router.pid"
+            }
+        }
+
+        var commandMarker: String {
+            switch self {
+            case .provider: return AppPaths.providerConfigPath().path
+            case .router: return "vibeshare-router"
+            }
+        }
+    }
 
     private func handleExit(_ which: Child) {
         queue.async {
             if self.stopping { return }
             switch which {
             case .provider:
-                DispatchQueue.main.async { self.providerRunning = false }
                 try? self.providerLog?.close(); self.providerLog = nil
+                self.removePID(.provider)
                 let ranAWhile = Date().timeIntervalSince(self.providerStartedAt) > 5
                 self.providerProcess = nil
                 if ranAWhile { self.startProvider() } // crashed after running -> recover
             case .router:
-                DispatchQueue.main.async { self.routerRunning = false }
                 try? self.routerLog?.close(); self.routerLog = nil
+                self.removePID(.router)
                 let ranAWhile = Date().timeIntervalSince(self.routerStartedAt) > 5
                 self.routerProcess = nil
                 if ranAWhile { self.startRouter() }
@@ -192,6 +200,54 @@ final class ProcessManager: ObservableObject {
 
     private func makeExecutable(_ url: URL) {
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    private func pidFile(_ child: Child) -> URL {
+        AppPaths.stateDir.appendingPathComponent(child.pidFileName)
+    }
+
+    private func writePID(_ pid: Int32, _ child: Child) {
+        try? String(pid).write(to: pidFile(child), atomically: true, encoding: .utf8)
+    }
+
+    private func removePID(_ child: Child) {
+        try? FileManager.default.removeItem(at: pidFile(child))
+    }
+
+    private func reapStale(_ child: Child) {
+        let file = pidFile(child)
+        guard let raw = try? String(contentsOf: file, encoding: .utf8),
+              let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            removePID(child)
+            return
+        }
+        guard isRunning(pid), commandLine(pid)?.contains(child.commandMarker) == true else {
+            removePID(child)
+            return
+        }
+        Foundation.kill(pid, SIGTERM)
+        let deadline = Date().addingTimeInterval(3)
+        while isRunning(pid) && Date() < deadline { usleep(50_000) }
+        if isRunning(pid) {
+            Foundation.kill(pid, SIGKILL)
+        }
+        removePID(child)
+    }
+
+    private func isRunning(_ pid: Int32) -> Bool {
+        Foundation.kill(pid, 0) == 0
+    }
+
+    private func commandLine(_ pid: Int32) -> String? {
+        let proc = Process()
+        let pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-p", String(pid), "-o", "command="]
+        proc.standardOutput = pipe
+        guard (try? proc.run()) != nil else { return nil }
+        proc.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
     }
 
     private func setError(_ msg: String) {

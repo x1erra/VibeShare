@@ -36,9 +36,9 @@ install: app ## Build and install to /Applications
 run: app ## Build and launch the app
 	@open "VibeShare.app"
 
-test: ## Vet the Go router
-	@cd router && $(GO) vet ./...
-	@echo "✅ go vet clean"
+test: ## Test the Go router
+	@cd router && $(GO) test ./...
+	@echo "✅ go tests clean"
 
 clean: ## Remove build artifacts and bundled router binary
 	@rm -rf src/.build router/vibeshare-router src/Sources/Resources/vibeshare-router "VibeShare.app"
