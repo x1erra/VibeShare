@@ -54,10 +54,10 @@ echo -e "${GREEN}✅ router archs: $(lipo -archs "$RESOURCES_DIR/vibeshare-route
 # 3. Build the Swift app (release).
 echo -e "${BLUE}Building Swift app (release)...${NC}"
 if [ "$UNIVERSAL" = "1" ]; then
-  ( cd "$SRC_DIR" && swift build -c release --arch arm64 --arch x86_64 )
+  ( cd "$SRC_DIR" && swift build -c release --arch arm64 --arch x86_64 -Xswiftc -DPACKAGED_APP )
   BUILD_DIR="$SRC_DIR/.build/apple/Products/Release"
 else
-  ( cd "$SRC_DIR" && swift build -c release ${TARGET_ARCH:+--arch "$TARGET_ARCH"} )
+  ( cd "$SRC_DIR" && swift build -c release ${TARGET_ARCH:+--arch "$TARGET_ARCH"} -Xswiftc -DPACKAGED_APP )
   BUILD_DIR="$SRC_DIR/.build/release"
 fi
 

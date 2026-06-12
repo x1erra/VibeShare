@@ -13,15 +13,13 @@ enum AppPaths {
     }
 
     /// Locates a bundled resource by name. Works for the packaged .app (files in
-    /// Contents/Resources) and for `swift run`/`swift build` (the SwiftPM
-    /// resource bundle).
+    /// Contents/Resources) and, in non-packaged development builds, for the
+    /// SwiftPM resource bundle.
     ///
-    /// CRITICAL: the packaged app must resolve via `Bundle.main` and return
-    /// before ever touching `Bundle.module` — that generated accessor calls
-    /// `fatalError` when its bundle isn't present (which is the case in our
-    /// packaged app), and in the universal build that crash happens at launch.
-    /// So `Bundle.module` is only reached as a last resort, in dev builds where
-    /// the bundle genuinely exists.
+    /// CRITICAL: packaged app builds define PACKAGED_APP so they never compile a
+    /// reference to `Bundle.module`. SwiftPM's generated accessor embeds an
+    /// absolute development bundle path, which leaks the local username into
+    /// strings output even if the app never reaches that branch at runtime.
     static func resource(_ name: String) -> URL? {
         let fm = FileManager.default
 
@@ -42,12 +40,15 @@ enum AppPaths {
             }
         }
 
-        // 3. Dev only — the SwiftPM `.copy("Resources")` bundle. Reached only
-        //    when the above failed; a correct packaged app never gets here.
+        #if !PACKAGED_APP
+        // 3. Dev only — the SwiftPM `.copy("Resources")` bundle.
         if let u = Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Resources") {
             return u
         }
         return Bundle.module.url(forResource: name, withExtension: nil)
+        #else
+        return nil
+        #endif
     }
 
     static var routerBinary: URL? { resource("vibeshare-router") }
