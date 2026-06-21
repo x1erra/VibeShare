@@ -1,6 +1,6 @@
 # Pinned CLIProxyAPI release artifacts for VibeShare's bundled provider engine.
 # SHA-256 of the upstream release tarballs (from the release's checksums.txt).
 # Bump together with CLIPROXY_VERSION in scripts/fetch-cliproxyapi.sh.
-# version: 7.1.62
-7f1c37b619dfe1c31ce1f04ca67863c84cd4537c5c3ad285751bc8c520b7f6b2  CLIProxyAPI_7.1.62_darwin_aarch64.tar.gz
-8fd725d0114680f7296094a37e2c3e79d58de28cdd8eaa77dc825130eec62aaf  CLIProxyAPI_7.1.62_darwin_amd64.tar.gz
+# version: 7.2.27
+d00b58e4444f05d75b32aefb3b21aca8ca517ea31675f9acb00ce9a1ab1c228a  CLIProxyAPI_7.2.27_darwin_aarch64.tar.gz
+f6299479a262b9d397c92b53e6f0f2052064f6cb140f9cd75b8d9feeafca7c15  CLIProxyAPI_7.2.27_darwin_amd64.tar.gz
