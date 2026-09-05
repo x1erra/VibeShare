@@ -7,7 +7,7 @@
 # Bump the engine by editing CLIPROXY_VERSION AND scripts/cliproxyapi.sha256 together.
 set -euo pipefail
 
-CLIPROXY_VERSION="${CLIPROXY_VERSION:-7.2.27}"
+CLIPROXY_VERSION="${CLIPROXY_VERSION:-7.2.151}"
 REPO="router-for-me/CLIProxyAPI"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
