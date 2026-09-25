@@ -96,27 +96,29 @@ func (c *ControlServer) getStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type grantView struct {
-	ID               string   `json:"id"`
-	Label            string   `json:"label"`
-	Code             string   `json:"code"`
-	Providers        []string `json:"providers"`
-	Models           []string `json:"models"`
-	CreatedAt        int64    `json:"createdAt"`
-	Revoked          bool     `json:"revoked"`
-	Paused           bool     `json:"paused"`
-	Online           bool     `json:"online"`
-	Routing          bool     `json:"routing"`
-	UsageLimited     bool     `json:"usageLimited"`     // fully auto-paused: reserve gate hid ALL models
-	LimitedProviders []string `json:"limitedProviders"` // providers the reserve gate paused (partial or full)
-	AdvertisedModels []string `json:"advertisedModels"`
-	TotalReqs        int      `json:"totalReqs"`
-	InputTokens      int64    `json:"inputTokens"`
-	OutputTokens     int64    `json:"outputTokens"`
-	TokenLimit       int64    `json:"tokenLimit"` // 0 = unlimited
+	ID               string                   `json:"id"`
+	Label            string                   `json:"label"`
+	Code             string                   `json:"code"`
+	Providers        []string                 `json:"providers"`
+	Models           []string                 `json:"models"`
+	CreatedAt        int64                    `json:"createdAt"`
+	Revoked          bool                     `json:"revoked"`
+	Paused           bool                     `json:"paused"`
+	Online           bool                     `json:"online"`
+	Routing          bool                     `json:"routing"`
+	UsageLimited     bool                     `json:"usageLimited"`     // fully auto-paused: reserve gate hid ALL models
+	LimitedProviders []string                 `json:"limitedProviders"` // providers the reserve gate paused (partial or full)
+	AdvertisedModels []string                 `json:"advertisedModels"`
+	TotalReqs        int                      `json:"totalReqs"`
+	InputTokens      int64                    `json:"inputTokens"`
+	OutputTokens     int64                    `json:"outputTokens"`
+	TokenLimit       int64                    `json:"tokenLimit"` // 0 = unlimited
+	ProviderUsage    map[string]ProviderUsage `json:"providerUsage,omitempty"`
 }
 
 func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
 	out := []grantView{}
+	usage := c.subUsage.MaybeRefresh()
 	for _, g := range c.store.Grants() {
 		st := c.host.Status(g.ID)
 		out = append(out, grantView{
@@ -137,6 +139,7 @@ func (c *ControlServer) listGrants(w http.ResponseWriter, r *http.Request) {
 			InputTokens:      st.InputTokens,
 			OutputTokens:     st.OutputTokens,
 			TokenLimit:       g.TokenLimit,
+			ProviderUsage:    sharedUsageForGrant(g, usage),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -250,22 +253,23 @@ func (c *ControlServer) deleteGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 type connectionView struct {
-	ID               string   `json:"id"`
-	Label            string   `json:"label"`
-	RedeemedAt       int64    `json:"redeemedAt"`
-	Online           bool     `json:"online"`
-	Routing          bool     `json:"routing"`
-	Revoked          bool     `json:"revoked"`
-	Paused           bool     `json:"paused"`                     // host paused sharing (still online)
-	PausedReason     string   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
-	LimitedProviders []string `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve
-	HostName         string   `json:"hostName"`
-	Models           []string `json:"models"`
-	TotalReqs        int      `json:"totalReqs"`
-	InputTokens      int64    `json:"inputTokens"`
-	OutputTokens     int64    `json:"outputTokens"`
-	TokenLimit       int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
-	TokensUsed       int64    `json:"tokensUsed"` // host-authoritative usage
+	ID               string                   `json:"id"`
+	Label            string                   `json:"label"`
+	RedeemedAt       int64                    `json:"redeemedAt"`
+	Online           bool                     `json:"online"`
+	Routing          bool                     `json:"routing"`
+	Revoked          bool                     `json:"revoked"`
+	Paused           bool                     `json:"paused"`                     // host paused sharing (still online)
+	PausedReason     string                   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
+	LimitedProviders []string                 `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve
+	HostName         string                   `json:"hostName"`
+	Models           []string                 `json:"models"`
+	TotalReqs        int                      `json:"totalReqs"`
+	InputTokens      int64                    `json:"inputTokens"`
+	OutputTokens     int64                    `json:"outputTokens"`
+	TokenLimit       int64                    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
+	TokensUsed       int64                    `json:"tokensUsed"` // host-authoritative usage
+	ProviderUsage    map[string]ProviderUsage `json:"providerUsage,omitempty"`
 }
 
 func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) {
@@ -294,6 +298,7 @@ func (c *ControlServer) listConnections(w http.ResponseWriter, r *http.Request) 
 			OutputTokens:     st.OutputTokens,
 			TokenLimit:       st.TokenLimit,
 			TokensUsed:       st.TokensUsed,
+			ProviderUsage:    st.ProviderUsage,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

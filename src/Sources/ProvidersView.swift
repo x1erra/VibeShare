@@ -119,7 +119,10 @@ struct ProviderRow: View {
                 refreshButton
             }
             if usage.hasData, !usage.shownWindows.isEmpty {
-                ForEach(usage.shownWindows) { windowRow($0) }
+                ForEach(usage.shownWindows) { UsageWindowRow(window: $0) }
+                if let err = usage.error, !err.isEmpty {
+                    Text("Last refresh failed: \(err)").font(.caption2).foregroundStyle(.orange)
+                }
             } else if let err = usage.error, !err.isEmpty {
                 Label("Limits: \(err)", systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -154,23 +157,46 @@ struct ProviderRow: View {
         }
     }
 
-    private func windowRow(_ w: UsageWindow) -> some View {
+}
+
+struct UsageWindowRow: View {
+    let window: UsageWindow
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text(w.label).font(.caption2)
+                Text(window.label).font(.caption2)
                 Spacer()
-                Text(detail(w)).font(.caption2).foregroundStyle(.secondary)
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
             }
-            ProgressView(value: min(max(w.utilization, 0), 100), total: 100)
+            ProgressView(value: min(max(window.utilization, 0), 100), total: 100)
                 .progressViewStyle(.linear)
-                .tint(w.percentUsed >= 90 ? .red : w.percentUsed >= 75 ? .orange : .blue)
+                .tint(window.percentUsed >= 90 ? .red : window.percentUsed >= 75 ? .orange : .blue)
         }
     }
 
-    private func detail(_ w: UsageWindow) -> String {
-        var parts = ["\(w.percentUsed)% used"]
-        if let r = w.resetText { parts.append(r) }
+    private var detail: String {
+        var parts = ["\(window.percentUsed)% used"]
+        if let r = window.resetText { parts.append(r) }
         return parts.joined(separator: " · ")
+    }
+}
+
+struct SharedUsageBars: View {
+    let usage: [String: ProviderUsage]
+
+    var body: some View {
+        ForEach(usage.keys.sorted(), id: \.self) { provider in
+            if let snapshot = usage[provider], !snapshot.shownWindows.isEmpty {
+                Text("\(provider.capitalized) subscription limits")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .padding(.top, 3)
+                ForEach(snapshot.shownWindows) { UsageWindowRow(window: $0) }
+                if let err = snapshot.error, !err.isEmpty {
+                    Text("Last refresh failed: \(err)").font(.caption2).foregroundStyle(.orange)
+                }
+            }
+        }
     }
 }
 

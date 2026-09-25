@@ -57,18 +57,19 @@ type signalContent struct {
 
 // presenceContent is the decrypted body of a `t:"presence"` Nostr event.
 type presenceContent struct {
-	Role             string   `json:"role"`             // "host" | "guest"
-	Name             string   `json:"name,omitempty"`   // host's identity label
-	Models           []string `json:"models,omitempty"` // models the host is sharing via this grant
-	Peer             string   `json:"peer,omitempty"`   // guest's ephemeral session id
-	Routing          bool     `json:"routing,omitempty"`
-	Revoked          bool     `json:"revoked,omitempty"`    // host→guest: grant was revoked permanently
-	Paused           bool     `json:"paused,omitempty"`     // host→guest: sharing temporarily paused (still online)
-	Reason           string   `json:"reason,omitempty"`     // host→guest: why fully paused (e.g. session usage limit)
-	LimitedProviders []string `json:"limited,omitempty"`    // host→guest: providers auto-paused by the reserve (partial or full)
-	TokenLimit       int64    `json:"tokenLimit,omitempty"` // host→guest: this friend's allotment (0 = unlimited)
-	TokensUsed       int64    `json:"tokensUsed,omitempty"` // host→guest: authoritative tokens consumed so far
-	TS               int64    `json:"ts"`
+	Role             string                   `json:"role"`             // "host" | "guest"
+	Name             string                   `json:"name,omitempty"`   // host's identity label
+	Models           []string                 `json:"models,omitempty"` // models the host is sharing via this grant
+	Peer             string                   `json:"peer,omitempty"`   // guest's ephemeral session id
+	Routing          bool                     `json:"routing,omitempty"`
+	Revoked          bool                     `json:"revoked,omitempty"`       // host→guest: grant was revoked permanently
+	Paused           bool                     `json:"paused,omitempty"`        // host→guest: sharing temporarily paused (still online)
+	Reason           string                   `json:"reason,omitempty"`        // host→guest: why fully paused (e.g. session usage limit)
+	LimitedProviders []string                 `json:"limited,omitempty"`       // host→guest: providers auto-paused by the reserve (partial or full)
+	TokenLimit       int64                    `json:"tokenLimit,omitempty"`    // host→guest: this friend's allotment (0 = unlimited)
+	TokensUsed       int64                    `json:"tokensUsed,omitempty"`    // host→guest: authoritative tokens consumed so far
+	ProviderUsage    map[string]ProviderUsage `json:"providerUsage,omitempty"` // host→guest: shared subscription windows only
+	TS               int64                    `json:"ts"`
 }
 
 // frame is a JSON message sent over the WebRTC DataChannel.

@@ -101,6 +101,7 @@ struct GrantView: Codable, Identifiable {
     var inputTokens: Int
     var outputTokens: Int
     var tokenLimit: Int // 0 = unlimited
+    var providerUsage: [String: ProviderUsage]
 
     var totalTokens: Int { inputTokens + outputTokens }
 
@@ -131,6 +132,7 @@ struct GrantView: Codable, Identifiable {
         inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
         outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
         tokenLimit = try c.decodeIfPresent(Int.self, forKey: .tokenLimit) ?? 0
+        providerUsage = try c.decodeIfPresent([String: ProviderUsage].self, forKey: .providerUsage) ?? [:]
     }
 }
 
@@ -151,6 +153,7 @@ struct ConnectionView: Codable, Identifiable {
     var outputTokens: Int
     var tokenLimit: Int // host-advertised allotment, 0 = unlimited
     var tokensUsed: Int // host-authoritative usage, drives remaining
+    var providerUsage: [String: ProviderUsage]
 
     var totalTokens: Int { inputTokens + outputTokens }
 
@@ -179,6 +182,7 @@ struct ConnectionView: Codable, Identifiable {
         outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
         tokenLimit = try c.decodeIfPresent(Int.self, forKey: .tokenLimit) ?? 0
         tokensUsed = try c.decodeIfPresent(Int.self, forKey: .tokensUsed) ?? 0
+        providerUsage = try c.decodeIfPresent([String: ProviderUsage].self, forKey: .providerUsage) ?? [:]
     }
 }
 

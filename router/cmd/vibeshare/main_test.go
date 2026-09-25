@@ -20,6 +20,8 @@ func TestDestructiveCommandsRequireYes(t *testing.T) {
 		{"grants", "revoke", "id"},
 		{"connections", "drop", "id"},
 		{"providers", "disconnect", "claude"},
+		{"app", "quit"},
+		{"app", "restart"},
 	} {
 		if err := dispatch(nil, args, false); err == nil {
 			t.Errorf("%v did not require --yes", args)

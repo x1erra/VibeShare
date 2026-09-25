@@ -128,37 +128,30 @@ struct SettingsTab: View {
         }
     }
 
-    /// Shows where each tracked provider's session currently sits, highlighting any
-    /// already past the stop threshold so the effect of the slider is visible.
+    /// Show every available subscription window here as well as in Providers.
+    /// Only the session window controls the reserve gate.
     @ViewBuilder
     private var sessionUsageReadout: some View {
         let usage = controller.status?.providerUsage ?? [:]
         let threshold = max(0, 100 - Int(reserve))
-        let rows: [(name: String, window: UsageWindow)] = [("Claude", "claude"), ("Codex", "codex")]
-            .compactMap { name, key in
-                guard let w = usage[key]?.shownWindows
-                    .first(where: { $0.label.lowercased().hasPrefix("session") }) else { return nil }
-                return (name, w)
-            }
-        if !rows.isEmpty {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(rows, id: \.name) { row in
-                    // Compare the raw utilization (not the rounded percent) so this
-                    // indicator matches the Go gate's `util >= threshold` exactly.
-                    let paused = row.window.utilization >= Double(threshold)
-                    HStack {
-                        Text(row.name).font(.caption2)
-                        Spacer()
-                        Text(paused
-                             ? "\(row.window.percentUsed)% used · sharing paused"
-                             : "\(row.window.percentUsed)% used")
-                            .font(.caption2)
-                            .foregroundStyle(paused ? Color.orange : Color.secondary)
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(["claude", "codex"], id: \.self) { key in
+                if let snapshot = usage[key], !snapshot.shownWindows.isEmpty {
+                    Text("\(key.capitalized) subscription limits")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    ForEach(snapshot.shownWindows) { window in
+                        UsageWindowRow(window: window)
+                        // Compare raw utilization so this matches the Go gate.
+                        if window.label.lowercased().hasPrefix("session") &&
+                            window.utilization >= Double(threshold) {
+                            Text("Sharing paused by session reserve")
+                                .font(.caption2).foregroundStyle(.orange)
+                        }
                     }
                 }
             }
-            .padding(.top, 2)
         }
+        .padding(.top, 2)
     }
 
     // MARK: Notifications

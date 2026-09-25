@@ -92,6 +92,13 @@ struct ConnectionRow: View {
                         .progressViewStyle(.linear).tint(allotmentColor)
                 }
             }
+            if connection.online && !connection.revoked {
+                SharedUsageBars(usage: connection.providerUsage)
+                if connection.providerUsage.isEmpty && !connection.models.isEmpty {
+                    Text("Subscription limit bars unavailable from this host")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Text("\(connection.models.count) models").font(.caption2).foregroundStyle(.secondary)
                 Spacer()

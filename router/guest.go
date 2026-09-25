@@ -38,12 +38,13 @@ type guestConn struct {
 	mu          sync.Mutex
 	hostName    string
 	hostModels  []string
-	hostRevoked bool     // host permanently revoked this grant
-	hostPaused  bool     // host paused sharing (still online, advertising 0 models)
-	hostReason  string   // why the host is fully paused (e.g. session usage limit), if given
-	hostLimited []string // providers the host auto-paused by reserve (partial or full)
-	tokenLimit  int64    // host-advertised allotment for this connection (0 = unlimited)
-	tokensUsed  int64    // host-authoritative tokens consumed so far
+	hostRevoked bool                     // host permanently revoked this grant
+	hostPaused  bool                     // host paused sharing (still online, advertising 0 models)
+	hostReason  string                   // why the host is fully paused (e.g. session usage limit), if given
+	hostLimited []string                 // providers the host auto-paused by reserve (partial or full)
+	hostUsage   map[string]ProviderUsage // subscription windows the host shared
+	tokenLimit  int64                    // host-advertised allotment for this connection (0 = unlimited)
+	tokensUsed  int64                    // host-authoritative tokens consumed so far
 	lastSeen    int64
 	active      int
 	session     *guestSession
@@ -216,6 +217,7 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 		}
 		gc.hostReason = pc.Reason
 		gc.hostLimited = pc.LimitedProviders
+		gc.hostUsage = pc.ProviderUsage
 		gc.tokenLimit = pc.TokenLimit
 		gc.tokensUsed = pc.TokensUsed
 		if pc.Revoked {
@@ -887,19 +889,20 @@ func (s *guestSession) isAuthed() bool {
 
 // ConnStatus is the guest-side runtime view of one connection.
 type ConnStatus struct {
-	Online           bool     `json:"online"`
-	Routing          bool     `json:"routing"`
-	Revoked          bool     `json:"revoked"`
-	Paused           bool     `json:"paused"`                     // host paused sharing (still online)
-	PausedReason     string   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
-	LimitedProviders []string `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve (partial or full)
-	HostName         string   `json:"hostName"`
-	Models           []string `json:"models"`
-	TotalReqs        int      `json:"totalReqs"`
-	InputTokens      int64    `json:"inputTokens"`
-	OutputTokens     int64    `json:"outputTokens"`
-	TokenLimit       int64    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
-	TokensUsed       int64    `json:"tokensUsed"` // host-authoritative usage, for the remaining calc
+	Online           bool                     `json:"online"`
+	Routing          bool                     `json:"routing"`
+	Revoked          bool                     `json:"revoked"`
+	Paused           bool                     `json:"paused"`                     // host paused sharing (still online)
+	PausedReason     string                   `json:"pausedReason,omitempty"`     // why, if the host said (e.g. usage limit)
+	LimitedProviders []string                 `json:"limitedProviders,omitempty"` // providers auto-paused by the host's reserve (partial or full)
+	HostName         string                   `json:"hostName"`
+	Models           []string                 `json:"models"`
+	TotalReqs        int                      `json:"totalReqs"`
+	InputTokens      int64                    `json:"inputTokens"`
+	OutputTokens     int64                    `json:"outputTokens"`
+	TokenLimit       int64                    `json:"tokenLimit"` // host-advertised allotment (0 = unlimited)
+	TokensUsed       int64                    `json:"tokensUsed"` // host-authoritative usage, for the remaining calc
+	ProviderUsage    map[string]ProviderUsage `json:"providerUsage,omitempty"`
 }
 
 func (g *GuestManager) Status(connID string) ConnStatus {
@@ -928,5 +931,8 @@ func (g *GuestManager) Status(connID string) ConnStatus {
 	st.Models = append([]string(nil), gc.hostModels...)
 	st.TokenLimit = gc.tokenLimit
 	st.TokensUsed = gc.tokensUsed
+	if st.Online {
+		st.ProviderUsage = gc.hostUsage
+	}
 	return st
 }

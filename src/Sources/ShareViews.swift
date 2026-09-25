@@ -141,6 +141,7 @@ struct GrantRow: View {
                     .help("Permanently kill this code — to share again you'll need to send a new one")
             }
             allotmentRow
+            SharedUsageBars(usage: grant.providerUsage)
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))

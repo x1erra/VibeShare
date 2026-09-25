@@ -54,15 +54,19 @@ func main() {
 	}
 	c, err := newClient(port)
 	if err != nil {
-		fail(err)
+		fail(err, jsonOut)
 	}
 	if err := dispatch(c, rest, jsonOut); err != nil {
-		fail(err)
+		fail(err, jsonOut)
 	}
 }
 
-func fail(err error) {
-	fmt.Fprintf(os.Stderr, "vibeshare: %s\n", err)
+func fail(err error, jsonOut bool) {
+	if jsonOut {
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": err.Error(), "ok": false})
+	} else {
+		fmt.Fprintf(os.Stderr, "vibeshare: %s\n", err)
+	}
 	os.Exit(1)
 }
 
@@ -74,8 +78,11 @@ an agent can drive a friend who has not installed 1.1 yet. Pass --json for a
 stable JSON result on stdout. Set VIBESHARE_JSON=1 for the same thing.
 
   vibeshare status
+  vibeshare doctor                       app, router, provider engine health
+  vibeshare models                       models available at the local endpoint
   vibeshare env                          shell exports for Claude / Codex
   vibeshare activity [N]
+  vibeshare logs [router|provider|login-<key>]
   vibeshare sharing on|off               master switch (also pauses lending)
   vibeshare config
   vibeshare config set identity <name>
@@ -96,6 +103,8 @@ stable JSON result on stdout. Set VIBESHARE_JSON=1 for the same thing.
   vibeshare providers login <key>        opens that provider's sign-in
   vibeshare providers disconnect <key> --yes
   vibeshare usage refresh <key>
+  vibeshare usage                         all available subscription bars
+  vibeshare app open|quit|restart         quit/restart require --yes
 
 Provider keys: claude, codex, gemini, kimi, antigravity, xai.
 Lending to a friend is "grants". Using a friend's models is "connections".
@@ -107,6 +116,14 @@ func dispatch(c *client, args []string, jsonOut bool) error {
 	switch args[0] {
 	case "status":
 		return c.show("GET", "/api/status", nil, jsonOut, printStatus)
+	case "doctor":
+		return doctor(c, jsonOut)
+	case "models":
+		return listModels(c, jsonOut)
+	case "logs":
+		return showLogs(args[1:], jsonOut)
+	case "app":
+		return cmdApp(args[1:], jsonOut)
 	case "env":
 		return printEnv(c, jsonOut)
 	case "activity":
@@ -129,8 +146,18 @@ func dispatch(c *client, args []string, jsonOut bool) error {
 	case "providers":
 		return cmdProviders(c, args[1:], jsonOut)
 	case "usage":
+		if len(args) == 1 {
+			st, _, err := c.get("/api/status")
+			if err != nil {
+				return err
+			}
+			return printJSON(st["providerUsage"])
+		}
 		if len(args) != 3 || args[1] != "refresh" {
-			return errors.New("usage: vibeshare usage refresh <provider>")
+			return errors.New("usage: vibeshare usage [refresh <claude|codex>]")
+		}
+		if args[2] != "claude" && args[2] != "codex" {
+			return errors.New("usage refresh supports claude and codex")
 		}
 		return c.show("POST", "/api/usage/"+args[2]+"/refresh", nil, jsonOut, nil)
 	default:
@@ -365,6 +392,9 @@ func cmdProviders(c *client, args []string, jsonOut bool) error {
 	}
 	switch args[0] {
 	case "login":
+		if jsonOut {
+			return errors.New("provider sign-in is interactive; run without --json")
+		}
 		return loginProvider(p)
 	case "disconnect":
 		if len(args) != 3 || args[2] != "--yes" {

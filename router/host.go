@@ -469,6 +469,10 @@ func (h *HostManager) buildPresence(hg *hostGrant) presenceContent {
 		}
 	}
 	u := h.store.Usage(hg.grant.ID)
+	providerUsage := map[string]ProviderUsage{}
+	if h.subUsage != nil {
+		providerUsage = sharedUsageForGrant(hg.grant, h.subUsage.MaybeRefresh())
+	}
 	return presenceContent{
 		Role:             "host",
 		Name:             h.store.Config().IdentityName,
@@ -478,6 +482,7 @@ func (h *HostManager) buildPresence(hg *hostGrant) presenceContent {
 		LimitedProviders: limited,
 		TokenLimit:       h.store.GrantLimit(hg.grant.ID),
 		TokensUsed:       u.InputTokens + u.OutputTokens,
+		ProviderUsage:    providerUsage,
 		TS:               time.Now().Unix(),
 	}
 }

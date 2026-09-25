@@ -153,15 +153,34 @@ Add `--json` (or set `VIBESHARE_JSON=1`) when a program is reading the result.
 
 ```bash
 vibeshare status
+vibeshare doctor             # app, router, and provider engine health
+vibeshare models             # all models exposed at the local endpoint
+vibeshare usage              # every available subscription limit window
 vibeshare connections          # friends whose models you are borrowing
 vibeshare grants               # codes you have given out
 vibeshare grants pause <id>    # stop lending to one friend; borrows stay up
 vibeshare env                  # ANTHROPIC_BASE_URL / OPENAI_BASE_URL exports
+vibeshare logs router          # last 50 router log lines
+vibeshare app restart --yes    # full restart after relay changes
 ```
 
 Revoking a code, dropping a borrow, and disconnecting a provider require
 `--yes`. Provider sign-in (`vibeshare providers login claude`) opens the same
 browser flow as the menu and does not run unless you ask for it.
+`vibeshare --json` returns the router's JSON for reads and writes. CLI-only
+commands return an object (`doctor`, `logs`, `app`) or model list (`models`).
+Errors exit nonzero and write `{"ok":false,"error":"..."}` to stderr.
+The CLI covers sharing, grants, connections, provider sign-in, usage,
+activity, models, logs, and router settings. macOS launch-at-login and native
+notification preferences are still managed in the app's Settings tab.
+
+Subscription bars show every limit window returned by a connected provider,
+including separate model-family windows such as Claude's weekly Fable limit.
+Share cards show the host's windows for the providers in that grant. Borrow
+cards show the same windows when the friend's app sends them; a friend still
+running VibeShare 1.0 will not send these bars until they upgrade. These
+percentages describe the host's subscription, separate from the token
+allotment assigned to a particular friend.
 
 Version 1.1 speaks the same offer, answer, and data-channel messages as 1.0.
 A Mac that has installed 1.1 keeps working with a friend who is still on 1.0.

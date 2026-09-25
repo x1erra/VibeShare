@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -130,6 +131,44 @@ func (m *SubscriptionMonitor) SessionUtilization(provider string) (float64, bool
 		}
 	}
 	return 0, false
+}
+
+// SharedUsage returns only subscription windows for providers a grant exposes.
+// A full-share grant exposes every monitored provider; a scoped grant never
+// leaks the host's unrelated subscription limits to its recipient.
+func sharedUsageForGrant(g Grant, snaps map[string]ProviderUsage) map[string]ProviderUsage {
+	out := map[string]ProviderUsage{}
+	for key, usage := range snaps {
+		if len(g.Models) > 0 {
+			found := false
+			for _, model := range g.Models {
+				if monitoredProviderForModel(model) == key {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		} else if len(g.Providers) > 0 {
+			found := false
+			for _, provider := range g.Providers {
+				if provider == key {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		if usage.UpdatedAt > 0 && len(usage.Windows) > 0 {
+			// Provider error bodies are local diagnostics; only percentages and
+			// reset times belong in the encrypted friend-facing presence.
+			out[key] = ProviderUsage{UpdatedAt: usage.UpdatedAt, Windows: append([]UsageWindow(nil), usage.Windows...)}
+		}
+	}
+	return out
 }
 
 // Refresh forces an immediate, synchronous usage fetch for one provider,
@@ -328,31 +367,69 @@ func fetchClaudeUsage(c *http.Client, cr rawCred) (ProviderUsage, int, error) {
 	if resp.StatusCode != http.StatusOK {
 		return ProviderUsage{}, resp.StatusCode, errors.New("usage endpoint returned " + resp.Status)
 	}
-	var raw struct {
-		FiveHour       *claudeWindow `json:"five_hour"`
-		SevenDay       *claudeWindow `json:"seven_day"`
-		SevenDayOpus   *claudeWindow `json:"seven_day_opus"`
-		SevenDaySonnet *claudeWindow `json:"seven_day_sonnet"`
-	}
+	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return ProviderUsage{}, resp.StatusCode, err
 	}
-	var out ProviderUsage
-	add := func(label string, w *claudeWindow) {
-		if w != nil {
-			out.Windows = append(out.Windows, UsageWindow{Label: label, Utilization: w.Utilization, ResetsAt: w.ResetsAt})
-		}
+	windows := parseClaudeWindows(raw)
+	if len(windows) == 0 {
+		return ProviderUsage{}, resp.StatusCode, errors.New("usage response had no recognizable windows")
 	}
-	add("Session (5h)", raw.FiveHour)
-	add("Weekly", raw.SevenDay)
-	add("Weekly · Opus", raw.SevenDayOpus)
-	add("Weekly · Sonnet", raw.SevenDaySonnet)
-	return out, resp.StatusCode, nil
+	return ProviderUsage{Windows: windows}, resp.StatusCode, nil
 }
 
 type claudeWindow struct {
-	Utilization float64 `json:"utilization"`
-	ResetsAt    string  `json:"resets_at"`
+	Utilization *float64 `json:"utilization"`
+	ResetsAt    string   `json:"resets_at"`
+}
+
+func parseClaudeWindows(raw map[string]json.RawMessage) []UsageWindow {
+	keys := make([]string, 0, len(raw))
+	for key := range raw {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		rank := func(k string) int {
+			switch k {
+			case "five_hour":
+				return 0
+			case "seven_day":
+				return 1
+			default:
+				return 2
+			}
+		}
+		if rank(keys[i]) != rank(keys[j]) {
+			return rank(keys[i]) < rank(keys[j])
+		}
+		return keys[i] < keys[j]
+	})
+	out := []UsageWindow{}
+	for _, key := range keys {
+		var window claudeWindow
+		if json.Unmarshal(raw[key], &window) != nil || window.Utilization == nil {
+			continue
+		}
+		label := usageLabel(key)
+		out = append(out, UsageWindow{Label: label, Utilization: *window.Utilization, ResetsAt: window.ResetsAt})
+	}
+	return out
+}
+
+func usageLabel(key string) string {
+	if key == "" {
+		return "Unknown"
+	}
+	switch key {
+	case "five_hour":
+		return "Session (5h)"
+	case "seven_day":
+		return "Weekly"
+	}
+	if strings.HasPrefix(key, "seven_day_") && len(key) > len("seven_day_") {
+		return "Weekly · " + strings.ToUpper(key[10:11]) + strings.ReplaceAll(key[11:], "_", " ")
+	}
+	return strings.ToUpper(key[:1]) + strings.ReplaceAll(key[1:], "_", " ")
 }
 
 // fetchCodexUsage queries ChatGPT's Codex usage endpoint. BEST-EFFORT / UNVERIFIED:
@@ -380,45 +457,69 @@ func fetchCodexUsage(c *http.Client, cr rawCred) (ProviderUsage, int, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
 		return ProviderUsage{}, resp.StatusCode, errors.New("usage endpoint returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
-	var raw struct {
-		RateLimit *struct {
-			Primary   *codexWindow `json:"primary_window"`
-			Secondary *codexWindow `json:"secondary_window"`
-		} `json:"rate_limit"`
-		Primary         *codexWindow `json:"primary"`
-		Secondary       *codexWindow `json:"secondary"`
-		PrimaryWindow   *codexWindow `json:"primary_window"`
-		SecondaryWindow *codexWindow `json:"secondary_window"`
-	}
+	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return ProviderUsage{}, resp.StatusCode, err
 	}
-	pick := func(opts ...*codexWindow) *codexWindow {
-		for _, o := range opts {
-			if o != nil {
-				return o
-			}
-		}
-		return nil
-	}
-	var primary, secondary *codexWindow
-	if raw.RateLimit != nil {
-		primary, secondary = raw.RateLimit.Primary, raw.RateLimit.Secondary
-	}
-	primary = pick(primary, raw.Primary, raw.PrimaryWindow)
-	secondary = pick(secondary, raw.Secondary, raw.SecondaryWindow)
-
-	var out ProviderUsage
-	if w := primary.toUsage("Session (5h)"); w != nil {
-		out.Windows = append(out.Windows, *w)
-	}
-	if w := secondary.toUsage("Weekly"); w != nil {
-		out.Windows = append(out.Windows, *w)
-	}
+	out := ProviderUsage{Windows: parseCodexWindows(raw)}
 	if len(out.Windows) == 0 {
 		return ProviderUsage{}, resp.StatusCode, errors.New("usage response had no recognizable windows")
 	}
 	return out, resp.StatusCode, nil
+}
+
+func parseCodexWindows(raw map[string]json.RawMessage) []UsageWindow {
+	out := []UsageWindow{}
+	addPair := func(prefix string, source map[string]json.RawMessage) {
+		for _, spec := range []struct {
+			keys  []string
+			label string
+		}{
+			{[]string{"primary_window", "primary"}, "Session (5h)"},
+			{[]string{"secondary_window", "secondary"}, "Weekly"},
+		} {
+			for _, key := range spec.keys {
+				var w codexWindow
+				if json.Unmarshal(source[key], &w) == nil {
+					if row := w.toUsage(prefix + spec.label); row != nil {
+						out = append(out, *row)
+						break
+					}
+				}
+			}
+		}
+	}
+	var standard map[string]json.RawMessage
+	if json.Unmarshal(raw["rate_limit"], &standard) == nil && standard != nil {
+		addPair("", standard)
+	} else {
+		addPair("", raw)
+	}
+	var byID map[string]json.RawMessage
+	if json.Unmarshal(raw["rate_limits_by_limit_id"], &byID) == nil && len(byID) > 0 {
+		standardWindows := out
+		out = nil // per-limit entries are more complete; avoid duplicate core bars
+		keys := make([]string, 0, len(byID))
+		for key := range byID {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			var group map[string]json.RawMessage
+			if json.Unmarshal(byID[key], &group) != nil {
+				continue
+			}
+			var inner map[string]json.RawMessage
+			if json.Unmarshal(group["rate_limit"], &inner) == nil && inner != nil {
+				group = inner
+			}
+			addPair(usageLabel(key)+" · ", group)
+		}
+		if len(out) == 0 {
+			out = standardWindows
+		}
+	}
+	return out
 }
 
 type codexWindow struct {
@@ -430,7 +531,7 @@ type codexWindow struct {
 }
 
 func (w *codexWindow) toUsage(label string) *UsageWindow {
-	if w == nil {
+	if w == nil || (w.UsedPercent == nil && w.Utilization == nil) {
 		return nil
 	}
 	util := 0.0
