@@ -83,4 +83,4 @@ exec codex \
   -c "model_providers.vibeshare_dad.base_url=\"http://127.0.0.1:$PORT/v1\"" \
   -c 'model_providers.vibeshare_dad.wire_api="responses"' \
   -c 'model_providers.vibeshare_dad.experimental_bearer_token="vibeshare"' \
-  "${ARGS[@]}"
+  ${ARGS[@]+"${ARGS[@]}"}
