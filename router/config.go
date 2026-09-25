@@ -27,7 +27,7 @@ var defaultNostrRelays = []string{
 	"wss://nos.lol",
 	"wss://nostr.mom",
 	"wss://relay.primal.net",
-	"wss://offchain.pub",
+	"wss://nostr-pub.wellorder.net",
 }
 
 // Config is the router's persisted configuration (~/.vibeshare/config.json).
