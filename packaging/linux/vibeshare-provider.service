@@ -1,0 +1,16 @@
+[Unit]
+Description=VibeShare Codex provider engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/vibeshare/cli-proxy-api -config %h/.config/vibeshare/provider.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=%h/.cli-proxy-api %h/.config/vibeshare
+
+[Install]
+WantedBy=default.target

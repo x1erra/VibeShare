@@ -14,11 +14,13 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUMS_FILE="$PROJECT_DIR/scripts/cliproxyapi.sha256"
 
 ARG_ARCH="${1:-$(uname -m)}"
+TARGET_OS="${VIBESHARE_TARGET_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 case "$ARG_ARCH" in
-  arm64|aarch64) ASSET_ARCH="darwin_aarch64" ;;
-  x86_64|amd64)  ASSET_ARCH="darwin_amd64" ;;
+  arm64|aarch64) ASSET_CPU="aarch64" ;;
+  x86_64|amd64)  ASSET_CPU="amd64" ;;
   *) echo "Unsupported arch: $ARG_ARCH" >&2; exit 1 ;;
 esac
+ASSET_ARCH="${TARGET_OS}_${ASSET_CPU}"
 DEST="${2:-$PROJECT_DIR/src/Sources/Resources/cli-proxy-api-plus}"
 mkdir -p "$(dirname "$DEST")"
 
@@ -34,7 +36,11 @@ EXPECTED="$(awk -v a="$ASSET" '$2 == a {print $1}' "$SUMS_FILE")"
 if [ -z "$EXPECTED" ]; then
   echo "ERROR: no pinned checksum for $ASSET in $SUMS_FILE" >&2; exit 1
 fi
-ACTUAL="$(shasum -a 256 "$TMP/$ASSET" | awk '{print $1}')"
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL="$(sha256sum "$TMP/$ASSET" | awk '{print $1}')"
+else
+  ACTUAL="$(shasum -a 256 "$TMP/$ASSET" | awk '{print $1}')"
+fi
 if [ "$EXPECTED" != "$ACTUAL" ]; then
   echo "ERROR: checksum mismatch for $ASSET — refusing to bundle an unverified binary." >&2
   echo "  expected $EXPECTED" >&2; echo "  actual   $ACTUAL" >&2; exit 1

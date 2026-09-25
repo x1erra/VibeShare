@@ -1,0 +1,16 @@
+[Unit]
+Description=VibeShare headless router
+After=network-online.target vibeshare-provider.service
+Wants=network-online.target vibeshare-provider.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/vibeshare/vibeshare-router -name Dad
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=%h/.vibeshare
+
+[Install]
+WantedBy=default.target

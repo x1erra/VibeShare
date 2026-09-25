@@ -1,0 +1,7 @@
+# Linux Mint headless host
+
+Run `scripts/build-linux.sh` on a Mac or Linux machine with Go 1.23 or newer. It cross-compiles the Go router and CLI for Linux x86_64, downloads the pinned CLIProxyAPI release, and verifies the published SHA-256 checksum. Copy the resulting bundle to the Mint machine and run `./install.sh` as the target desktop user. The installer verifies the bundle before installing user services. Both APIs bind only to loopback.
+
+On Mint, authenticate the provider with `~/.local/lib/vibeshare/cli-proxy-api -config ~/.config/vibeshare/provider.yaml -codex-device-login`. Complete the device prompt in the account holder's browser. This creates a separate OAuth credential in `~/.cli-proxy-api`; it does not alter the existing Codex CLI sign-in. Then create a Codex-only grant with `vibeshare grants create --label Mac --provider codex` and redeem its code on the Mac with `vibeshare connections redeem --code CODE --label Dad`. Handle the code as a bearer secret.
+
+The Mac's `scripts/codex-dad` launcher uses the connection ID saved in `~/.vibeshare-codex-dad/connection-id` and the existing `~/Documents/codex-shim`. It uses a separate local port (8768) and passes Codex settings only for that terminal process. The `X-VibeShare-Connection-ID` header pins every request to Dad's grant; when it is unavailable the request fails rather than spending another subscription. The usual Codex CLI and desktop app keep their own login.

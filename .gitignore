@@ -22,3 +22,4 @@ VibeShare.app/
 
 # Local state (never commit — contains secret grant codes)
 .vibeshare/
+dist/

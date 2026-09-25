@@ -74,6 +74,17 @@ func (s *FrontServer) localModels() ([]modelObject, map[string]bool) {
 }
 
 func (s *FrontServer) handleModels(w http.ResponseWriter, r *http.Request) {
+	if connID := r.Header.Get("X-VibeShare-Connection-ID"); connID != "" {
+		st := s.guest.Status(connID)
+		data := make([]modelObject, 0, len(st.Models))
+		if st.Online && !st.Revoked {
+			for _, id := range st.Models {
+				data = append(data, modelObject{ID: id, Object: "model", OwnedBy: "friend:" + st.HostName})
+			}
+		}
+		writeJSON(w, http.StatusOK, modelList{Object: "list", Data: data})
+		return
+	}
 	local, localIDs := s.localModels()
 	data := make([]modelObject, 0, len(local))
 	for _, m := range local {
@@ -112,6 +123,10 @@ func (s *FrontServer) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &probe)
+	if connID := r.Header.Get("X-VibeShare-Connection-ID"); connID != "" {
+		_ = s.guest.RouteConnection(r.Context(), connID, probe.Model, r.Method, r.URL.Path, r.Header, body, w)
+		return
+	}
 
 	_, localIDs := s.localModels()
 	if preferRemote(s.store.Config(), s.guest.CanRoute(probe.Model)) {

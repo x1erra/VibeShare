@@ -1,0 +1,85 @@
+#!/bin/bash
+# Terminal-only Codex launcher pinned to Dad's VibeShare connection.
+set -euo pipefail
+
+ROOT="$HOME/.vibeshare-codex-dad"
+SHIM="$HOME/Documents/codex-shim"
+PY="$SHIM/.venv/bin/python"
+REFRESH="$(dirname "$(realpath "$0")")/refresh-codex-dad.py"
+PORT=8768
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  echo "Usage: codex-dad [--models|--status|--refresh|--stop] [-m MODEL] [Codex args...]"
+  exit 0
+fi
+[[ -x "$PY" ]] || { echo "codex-dad: Codex shim is missing at $SHIM" >&2; exit 1; }
+[[ -s "$ROOT/connection-id" ]] || { echo "codex-dad: Dad's connection has not been paired" >&2; exit 1; }
+
+case "${1:-}" in
+  --stop)
+    if [[ -s "$ROOT/shim.pid" ]]; then kill "$(cat "$ROOT/shim.pid")" 2>/dev/null || true; rm -f "$ROOT/shim.pid"; fi
+    exit 0 ;;
+  --status)
+    curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" || true
+    "$PY" "$REFRESH" || exit 1
+    exit 0 ;;
+  --models|--refresh)
+    "$PY" "$REFRESH"
+    exit 0 ;;
+esac
+
+MODEL="${VS_DAD_MODEL:-}"
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m|--model)
+      [[ $# -ge 2 ]] || { echo "codex-dad: -m needs a model" >&2; exit 1; }
+      MODEL="$2"; shift 2 ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+
+LIVE="$("$PY" "$REFRESH")" || exit 1
+if [[ -z "$MODEL" ]]; then
+  for preferred in gpt-6-astra gpt-6-sol gpt-5.6-sol; do
+    if grep -Fxq "$preferred" <<<"$LIVE"; then MODEL="$preferred"; break; fi
+  done
+  [[ -n "$MODEL" ]] || MODEL="$(head -1 <<<"$LIVE")"
+fi
+if ! grep -Fxq "$MODEL" <<<"$LIVE"; then
+  echo "codex-dad: $MODEL is not shared by Dad. Available models:" >&2
+  printf '%s\n' "$LIVE" >&2
+  exit 1
+fi
+
+if ! curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:$PORT/health"; then
+  cd "$SHIM"
+  PYTHONPATH="$SHIM" nohup "$PY" -m codex_shim.server \
+    --settings "$ROOT/models.json" --host 127.0.0.1 --port "$PORT" >>"$ROOT/shim.log" 2>&1 &
+  echo $! > "$ROOT/shim.pid"
+  for _ in $(seq 1 40); do
+    curl -fsS --max-time 1 -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null && break
+    sleep 0.25
+  done
+fi
+curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:$PORT/health" || { echo "codex-dad: shim failed; see $ROOT/shim.log" >&2; exit 1; }
+
+SLUG="$("$PY" - "$ROOT/models.json" "$MODEL" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / "Documents/codex-shim"))
+from codex_shim.settings import FactorySettings
+models = FactorySettings(Path(sys.argv[1])).load()
+print(next(m.slug for m in models if m.model == sys.argv[2]))
+PY
+)"
+echo "→ codex-dad: $MODEL through Dad's VibeShare connection" >&2
+exec codex \
+  -c "model=\"$SLUG\"" \
+  -c 'model_provider="vibeshare_dad"' \
+  -c "model_catalog_json=\"$ROOT/catalog.json\"" \
+  -c 'model_providers.vibeshare_dad.name="VibeShare Dad"' \
+  -c "model_providers.vibeshare_dad.base_url=\"http://127.0.0.1:$PORT/v1\"" \
+  -c 'model_providers.vibeshare_dad.wire_api="responses"' \
+  -c 'model_providers.vibeshare_dad.experimental_bearer_token="vibeshare"' \
+  "${ARGS[@]}"

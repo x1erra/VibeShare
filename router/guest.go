@@ -384,6 +384,41 @@ func (g *GuestManager) hostsForModel(model string) []*guestConn {
 	return out
 }
 
+// hostForConnection selects only the requested grant. A pinned terminal client
+// must never silently spend another friend's allotment on a model collision.
+func (g *GuestManager) hostForConnection(model, connID string) *guestConn {
+	g.mu.Lock()
+	gc := g.conns[connID]
+	g.mu.Unlock()
+	if gc == nil {
+		return nil
+	}
+	gc.mu.Lock()
+	defer gc.mu.Unlock()
+	if gc.hostRevoked || !gc.available(time.Now().Unix()) {
+		return nil
+	}
+	for _, m := range gc.hostModels {
+		if m == model {
+			return gc
+		}
+	}
+	return nil
+}
+
+func (g *GuestManager) RouteConnection(ctx context.Context, connID, model, method, path string, headers http.Header, body []byte, w http.ResponseWriter) error {
+	gc := g.hostForConnection(model, connID)
+	if gc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("selected connection is offline or does not share model "+model))
+		return errors.New("selected connection cannot serve " + model)
+	}
+	committed, err := g.routeVia(ctx, gc, model, method, path, headers, body, w)
+	if err != nil && !committed {
+		writeJSON(w, http.StatusBadGateway, errBody("selected connection failed: "+err.Error()))
+	}
+	return err
+}
+
 func sortGuestConns(conns []*guestConn) {
 	sort.SliceStable(conns, func(i, j int) bool {
 		li, lj := connSortLabel(conns[i]), connSortLabel(conns[j])
