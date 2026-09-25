@@ -1,4 +1,4 @@
-.PHONY: help router swift build app universal dmg universal-dmg install run clean test fetch-provider
+.PHONY: help router swift build app universal dmg universal-dmg install run clean test fetch-provider littlesnitch
 
 GO ?= $(shell command -v go || echo /opt/homebrew/bin/go)
 SWIFT_SDK ?= $(shell sdk=$$(xcrun --show-sdk-path 2>/dev/null); if [ -n "$$sdk" ] && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ] && realpath "$$sdk" | grep -q MacOSX27; then echo /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk; fi)
@@ -46,6 +46,10 @@ install: app ## Build and install to /Applications
 	@rm -rf "/Applications/VibeShare.app"
 	@cp -R "VibeShare.app" /Applications/
 	@echo "✅ Installed /Applications/VibeShare.app"
+	@./scripts/littlesnitch-sync.sh /Applications/VibeShare.app
+
+littlesnitch: ## Stop Little Snitch from blocking the installed app (no identity pinning)
+	@./scripts/littlesnitch-sync.sh /Applications/VibeShare.app
 
 run: app ## Build and launch the app
 	@open "VibeShare.app"
