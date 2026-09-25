@@ -93,6 +93,18 @@ func TestUnusableLocalCredential(t *testing.T) {
 	}
 }
 
+func TestBorrowFirstRequiresPreferenceAndAvailableFriend(t *testing.T) {
+	if preferRemote(Config{}, true) {
+		t.Fatal("upgrading an existing Mac must keep local-first routing")
+	}
+	if preferRemote(Config{PreferBorrowedModels: true}, false) {
+		t.Fatal("an unavailable friend must not hide local models")
+	}
+	if !preferRemote(Config{PreferBorrowedModels: true}, true) {
+		t.Fatal("borrow-first must bypass a colliding local model")
+	}
+}
+
 // A 400 that is not the version gate must reach the client untouched, body and
 // all — the peek used to classify it must not consume the response.
 func TestClientErrorBodySurvivesPeek(t *testing.T) {

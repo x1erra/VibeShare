@@ -8,6 +8,7 @@ struct RouterStatus: Codable {
     var controlPort: Int
     var identityName: String
     var sharingEnabled: Bool
+    var preferBorrowedModels: Bool?
     var autoStopSharing: Bool?
     var usageReservePercent: Int?
     var upstream: UpstreamStatus
@@ -185,6 +186,7 @@ struct RouterConfigUpdate: Encodable {
     var nostrRelays: [String]? = nil
     var identityName: String? = nil
     var enableSharing: Bool? = nil
+    var preferBorrowedModels: Bool? = nil
     var autoStopSharing: Bool? = nil
     var usageReservePercent: Int? = nil
 }

@@ -66,6 +66,13 @@ struct SettingsTab: View {
             }
             .font(.subheadline)
 
+        Toggle("Prefer a friend's models over local models", isOn: Binding(
+            get: { controller.status?.preferBorrowedModels ?? false },
+            set: { on in Task { await controller.setPreferBorrowedModels(on) } }
+        ))
+        .font(.subheadline)
+        .help("Use a friend's share first when both Macs list the same model. Keep this off to use your own subscription first.")
+
         if AppController.launchAtLoginAvailable {
             Toggle("Start VibeShare at login", isOn: Binding(
                 get: { controller.launchAtLogin },

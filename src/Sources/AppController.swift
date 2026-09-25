@@ -215,6 +215,15 @@ final class AppController: ObservableObject {
         await refresh()
     }
 
+    func setPreferBorrowedModels(_ enabled: Bool) async {
+        do {
+            try await client.updateConfig(RouterConfigUpdate(preferBorrowedModels: enabled))
+        } catch {
+            softError = error.localizedDescription
+        }
+        await refresh()
+    }
+
     /// Force an immediate subscription-usage refetch for one provider (the
     /// refresh button), bypassing the router's 10-minute cache.
     func refreshUsage(_ provider: String) async {

@@ -35,6 +35,10 @@ type Config struct {
 	NostrRelays    []string `json:"nostrRelays"`    // signaling relays
 	IdentityName   string   `json:"identityName"`   // human label others see ("Brandon's Mac")
 	EnableSharing  bool     `json:"enableSharing"`  // master switch for the P2P layer
+	// PreferBorrowedModels sends a model shared by a friend to that friend even
+	// when the local provider engine advertises the same model. Useful on a
+	// borrow-only Mac with an unusable local sign-in; defaults off for upgrades.
+	PreferBorrowedModels bool `json:"preferBorrowedModels"`
 	// ShareUsageLevel is preserved for the menu. The router does not interpret it.
 	ShareUsageLevel string `json:"shareUsageLevel,omitempty"`
 

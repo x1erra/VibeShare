@@ -80,6 +80,7 @@ stable JSON result on stdout. Set VIBESHARE_JSON=1 for the same thing.
   vibeshare config
   vibeshare config set identity <name>
   vibeshare config set auto-stop on|off
+  vibeshare config set prefer-borrowed on|off
   vibeshare config set reserve <1-95>
   vibeshare config set relays <wss-url>...
   vibeshare grants
@@ -142,7 +143,7 @@ func cmdConfig(c *client, args []string, jsonOut bool) error {
 		return c.show("GET", "/api/config", nil, jsonOut, nil)
 	}
 	if args[0] != "set" || len(args) < 3 {
-		return errors.New("usage: vibeshare config set identity|auto-stop|reserve|relays ...")
+		return errors.New("usage: vibeshare config set identity|auto-stop|prefer-borrowed|reserve|relays ...")
 	}
 	var body map[string]any
 	switch args[1] {
@@ -153,6 +154,11 @@ func cmdConfig(c *client, args []string, jsonOut bool) error {
 			return errors.New("auto-stop expects on or off")
 		}
 		body = map[string]any{"autoStopSharing": args[2] == "on"}
+	case "prefer-borrowed":
+		if args[2] != "on" && args[2] != "off" {
+			return errors.New("prefer-borrowed expects on or off")
+		}
+		body = map[string]any{"preferBorrowedModels": args[2] == "on"}
 	case "reserve":
 		n, err := strconv.Atoi(args[2])
 		if err != nil || n < 1 || n > 95 {
@@ -488,6 +494,9 @@ func printStatus(body []byte) {
 		sharing = "on"
 	}
 	fmt.Printf("router %s  sharing %s  %s\n", ver, sharing, st["identityName"])
+	if st["preferBorrowedModels"] == true {
+		fmt.Println("routing priority: borrowed models")
+	}
 	if up, ok := st["upstream"].(map[string]any); ok {
 		reach := "down"
 		if up["reachable"] == true {

@@ -121,6 +121,10 @@ to also notarize and staple it for distribution to other Macs.
   the friend who served it last (keeps their provider-side prompt cache warm),
   prefer whoever has the most allotment left, and automatically fail over to the
   next friend if one is unreachable or out of budget.
+- If this Mac only borrows a provider and its local sign-in is unusable, turn on
+  **Prefer a friend's models over local models** in Settings (or run
+  `vibeshare config set prefer-borrowed on`). A shared model then goes directly
+  to the friend even when the local engine still lists it. The default is off.
 
 ### Use with Claude Code
 

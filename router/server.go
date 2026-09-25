@@ -114,6 +114,11 @@ func (s *FrontServer) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(body, &probe)
 
 	_, localIDs := s.localModels()
+	if preferRemote(s.store.Config(), s.guest.CanRoute(probe.Model)) {
+		log.Printf("front: preferring friend for %s", probe.Model)
+		_ = s.guest.RouteRequest(r.Context(), probe.Model, r.Method, r.URL.Path, r.Header, body, w)
+		return
+	}
 
 	// 1. Local model -> forward to upstream.
 	if localIDs[probe.Model] {
@@ -161,6 +166,10 @@ func (s *FrontServer) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNotFound, map[string]any{
 		"error": map[string]any{"message": msg, "type": "model_not_found"},
 	})
+}
+
+func preferRemote(cfg Config, friendSharesModel bool) bool {
+	return cfg.PreferBorrowedModels && friendSharesModel
 }
 
 func (s *FrontServer) handlePassthrough(w http.ResponseWriter, r *http.Request) {

@@ -76,14 +76,15 @@ func (c *ControlServer) handler() http.Handler {
 func (c *ControlServer) getStatus(w http.ResponseWriter, r *http.Request) {
 	cfg := c.store.Config()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"running":             true,
-		"version":             appVersion,
-		"frontPort":           cfg.FrontPort,
-		"controlPort":         cfg.ControlPort,
-		"identityName":        cfg.IdentityName,
-		"sharingEnabled":      cfg.EnableSharing,
-		"autoStopSharing":     cfg.AutoStopSharing,
-		"usageReservePercent": cfg.UsageReservePercent,
+		"running":              true,
+		"version":              appVersion,
+		"frontPort":            cfg.FrontPort,
+		"controlPort":          cfg.ControlPort,
+		"identityName":         cfg.IdentityName,
+		"sharingEnabled":       cfg.EnableSharing,
+		"preferBorrowedModels": cfg.PreferBorrowedModels,
+		"autoStopSharing":      cfg.AutoStopSharing,
+		"usageReservePercent":  cfg.UsageReservePercent,
 		"upstream": map[string]any{
 			"url":       cfg.UpstreamURL,
 			"reachable": c.upstream.Reachable(),
