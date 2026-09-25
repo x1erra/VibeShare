@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +37,10 @@ type NostrClient struct {
 // or how a signal is encoded; it only stops this process from hammering a
 // relay that has already refused it.
 type relayHealth struct {
-	failUntil time.Time
-	deadlines int
+	failUntil      time.Time
+	soft           bool // failUntil came from slow acks only
+	throttledUntil time.Time
+	deadlines      int
 }
 
 func newNostrClient(urls []string) *NostrClient {
@@ -122,7 +125,7 @@ func (n *NostrClient) Publish(roomID, tType, content string) {
 		return
 	}
 
-	for _, r := range n.publishTargets() {
+	for _, r := range n.publishTargets(tType == "signal") {
 		go func(r *nostr.Relay) {
 			ctx, cancel := context.WithTimeout(n.ctx, 8*time.Second)
 			defer cancel()
@@ -138,7 +141,7 @@ func (n *NostrClient) Publish(roomID, tType, content string) {
 
 // publishTargets skips relays that recently refused us. A relay in cooldown
 // cannot carry an offer or presence update and retrying can extend its ban.
-func (n *NostrClient) publishTargets() []*nostr.Relay {
+func (n *NostrClient) publishTargets(signal bool) []*nostr.Relay {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	now := time.Now()
@@ -146,10 +149,11 @@ func (n *NostrClient) publishTargets() []*nostr.Relay {
 	items := make([]relayCandidate, 0, len(n.relays))
 	for url, r := range n.relays {
 		byURL[url] = r
-		items = append(items, relayCandidate{URL: url, FailUntil: n.health[url].failUntil})
+		h := n.health[url]
+		items = append(items, relayCandidate{URL: url, FailUntil: h.failUntil, Soft: h.soft, Throttled: h.throttledUntil})
 	}
 	var out []*nostr.Relay
-	for _, url := range pickRelayURLs(now, items) {
+	for _, url := range pickRelayURLs(now, items, signal, samplePresence) {
 		if r := byURL[url]; r != nil {
 			out = append(out, r)
 		}
@@ -172,9 +176,14 @@ func (n *NostrClient) noteSuccess(url string) {
 	h := n.health[url]
 	h.deadlines = 0
 	h.failUntil = time.Time{}
+	h.soft = false
 	n.health[url] = h
 	n.mu.Unlock()
 }
+
+// samplePresence keeps about a third of heartbeats for a throttled relay:
+// ~9 room heartbeats/min become ~3, and random choice spreads them over rooms.
+func samplePresence() bool { return rand.Intn(3) == 0 }
 
 // RelayView is one configured relay as the control API reports it.
 type RelayView struct {

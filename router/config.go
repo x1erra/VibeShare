@@ -19,11 +19,15 @@ var errGrantNotFound = errors.New("grant not found")
 var errConnectionExists = errors.New("connection already exists")
 
 // defaultNostrRelays are public Nostr relays used purely for signaling and
-// encrypted presence. They never see plaintext.
+// encrypted presence. They never see plaintext. damus and nos.lol stay first
+// so older installs (which default to them) still share a relay with us;
+// relay.nostr.band stopped accepting connections in 2026.
 var defaultNostrRelays = []string{
 	"wss://relay.damus.io",
 	"wss://nos.lol",
-	"wss://relay.nostr.band",
+	"wss://nostr.mom",
+	"wss://relay.primal.net",
+	"wss://offchain.pub",
 }
 
 // Config is the router's persisted configuration (~/.vibeshare/config.json).
