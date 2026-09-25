@@ -20,7 +20,7 @@ case "${1:-}" in
     if [[ -s "$ROOT/shim.pid" ]]; then kill "$(cat "$ROOT/shim.pid")" 2>/dev/null || true; rm -f "$ROOT/shim.pid"; fi
     exit 0 ;;
   --status)
-    curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" || true
+    curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || echo "shim: stopped"
     "$PY" "$REFRESH" || exit 1
     exit 0 ;;
   --models|--refresh)
@@ -52,11 +52,12 @@ if ! grep -Fxq "$MODEL" <<<"$LIVE"; then
   exit 1
 fi
 
-if ! curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:$PORT/health"; then
+if ! curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
   cd "$SHIM"
   PYTHONPATH="$SHIM" nohup "$PY" -m codex_shim.server \
     --settings "$ROOT/models.json" --host 127.0.0.1 --port "$PORT" >>"$ROOT/shim.log" 2>&1 &
   echo $! > "$ROOT/shim.pid"
+  cd - >/dev/null
   for _ in $(seq 1 40); do
     curl -fsS --max-time 1 -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null && break
     sleep 0.25
