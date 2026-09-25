@@ -25,11 +25,13 @@ struct RouterStatus: Codable {
     struct RelayStatus: Codable, Identifiable {
         var url: String
         var connected: Bool
+        var coolingDown: Bool?
         var id: String { url }
+        var usable: Bool { connected && coolingDown != true }
     }
 
     var models: [String] { localModels ?? [] }
-    var connectedRelayCount: Int { nostr.relays.filter { $0.connected }.count }
+    var connectedRelayCount: Int { nostr.relays.filter { $0.usable }.count }
 
     /// Session-reserve gate state (host keeps a buffer of each provider's quota).
     var autoStopSharingOn: Bool { autoStopSharing ?? false }

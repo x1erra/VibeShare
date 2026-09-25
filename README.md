@@ -71,6 +71,11 @@ make universal-dmg               # Intel + Apple Silicon
 
 `make install` copies it to `/Applications`. Without a Developer ID it is
 ad-hoc signed (fine locally; right-click → Open the first time).
+Quit a running VibeShare before installing, then launch the new app. Replacing
+its signed files while the old menu-bar process is still running can leave
+Little Snitch matching the old process identity against the new build and block
+all relay connections. Check the relay count and a borrowed connection after
+relaunching.
 
 `make dmg` builds the app and wraps it in a drag-to-install disk image (app
 next to an `Applications` shortcut). With a Developer ID it signs the image;
@@ -134,6 +139,31 @@ check it). Tip: wrap it in a shell function so your normal `claude` is unchanged
 ```bash
 vibeclaude() { ANTHROPIC_BASE_URL=http://127.0.0.1:8788 ANTHROPIC_API_KEY=vibeshare claude "$@"; }
 ```
+
+## Agents and the CLI
+
+`vibeshare` drives the running menu-bar app over the loopback control API.
+Claude Code, Codex, Hermes, and Grok can share, borrow, pause, and change
+settings without clicking the menu. `vibeshare help` lists every command.
+Add `--json` (or set `VIBESHARE_JSON=1`) when a program is reading the result.
+
+```bash
+vibeshare status
+vibeshare connections          # friends whose models you are borrowing
+vibeshare grants               # codes you have given out
+vibeshare grants pause <id>    # stop lending to one friend; borrows stay up
+vibeshare env                  # ANTHROPIC_BASE_URL / OPENAI_BASE_URL exports
+```
+
+Revoking a code, dropping a borrow, and disconnecting a provider require
+`--yes`. Provider sign-in (`vibeshare providers login claude`) opens the same
+browser flow as the menu and does not run unless you ask for it.
+
+Version 1.1 speaks the same offer, answer, and data-channel messages as 1.0.
+A Mac that has installed 1.1 keeps working with a friend who is still on 1.0.
+The newer side is more patient when the path blips and puts ICE candidates in
+the SDP, which 1.0 already applies. Install 1.1 on both sides when you can:
+both ends then wait out a short disconnect instead of hanging up immediately.
 
 ## Ports & state
 

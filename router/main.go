@@ -113,7 +113,7 @@ func main() {
 	go serve("front", frontSrv)
 	go serve("control", controlSrv)
 
-	log.Printf("VibeShare router online")
+	log.Printf("VibeShare router online (%s)", appVersion)
 	log.Printf("  OpenAI endpoint : http://127.0.0.1:%d/v1", cfg.FrontPort)
 	log.Printf("  control API     : http://127.0.0.1:%d/api", cfg.ControlPort)
 	log.Printf("  upstream        : %s", cfg.UpstreamURL)

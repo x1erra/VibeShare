@@ -80,8 +80,13 @@ tagged `["d", roomID]` and a `t` type. All content is sealed with `announceKey`.
 | `signal`   | both         | `{from, session, kind:"offer"\|"answer"\|"ice", payload}`                   |
 
 Once offer/answer/ICE complete, a direct WebRTC **DataChannel** (reliable,
-ordered, DTLS-encrypted) carries the traffic — Nostr is no longer used. Frames
-are JSON text messages; request and response bodies are base64-chunked to stay
+ordered, DTLS-encrypted) carries the traffic — Nostr is no longer used.
+1.1 gathers ICE candidates into the offer or answer SDP and still accepts the
+1.0 per-candidate `ice` signals, so a 1.1 peer talks to a 1.0 peer unchanged.
+A transient ICE `disconnected` is given 15 seconds to recover; `failed` and
+`closed` still end the session. A 1.0 peer that hangs up on `disconnected`
+just causes the 1.1 side to open a fresh offer, which 1.0 already answers.
+Frames are JSON text messages; request and response bodies are base64-chunked to stay
 under the channel's per-message size limit:
 
 | frame                | direction    | fields                                          |
@@ -135,6 +140,9 @@ feed.
 | `GET /api/config` / `PUT`      | read/update identity name, ports, relays                 |
 | `GET /api/events`              | SSE stream of state changes (live UI updates)            |
 | `GET /api/activity`            | recent routed requests, both directions (live feed)      |
+
+`vibeshare` (router/cmd/vibeshare) is the agent-facing client for this API.
+It does not keep its own copy of grants or sign-ins.
 
 A grant can be **paused**: the host keeps broadcasting presence (with
 `paused:true` and no models) but refuses requests, so the guest sees "paused"

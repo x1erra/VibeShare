@@ -35,6 +35,8 @@ type Config struct {
 	NostrRelays    []string `json:"nostrRelays"`    // signaling relays
 	IdentityName   string   `json:"identityName"`   // human label others see ("Brandon's Mac")
 	EnableSharing  bool     `json:"enableSharing"`  // master switch for the P2P layer
+	// ShareUsageLevel is preserved for the menu. The router does not interpret it.
+	ShareUsageLevel string `json:"shareUsageLevel,omitempty"`
 
 	// AutoStopSharing keeps a slice of each provider's subscription for the host:
 	// when a provider's 5-hour session window climbs past 100-UsageReservePercent,

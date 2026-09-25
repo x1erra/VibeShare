@@ -223,8 +223,9 @@ struct SettingsTab: View {
         } else {
             ForEach(controller.status?.nostr.relays ?? []) { r in
                 HStack {
-                    StatusDot(on: r.connected)
+                    StatusDot(on: r.usable)
                     Text(r.url).font(.system(.caption2, design: .monospaced))
+                    if r.coolingDown == true { Text("Cooling down").font(.caption2).foregroundStyle(.secondary) }
                     Spacer()
                 }
             }

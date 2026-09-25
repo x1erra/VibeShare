@@ -9,6 +9,7 @@ router/router
 
 # Bundled binaries (downloaded/built — not committed)
 src/Sources/Resources/vibeshare-router
+src/Sources/Resources/vibeshare
 src/Sources/Resources/cli-proxy-api-plus
 
 # App bundle

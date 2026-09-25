@@ -257,10 +257,11 @@ const maxErrorBodyBytes = 64 * 1024
 
 // unusableLocalCredential reports whether a local response means "this engine
 // cannot serve this model right now" rather than "your request was wrong".
-// Only 401/403 (dead or unauthorised credential) and Anthropic's
-// claude_code_version_too_old gate qualify: both are properties of the local
-// install, not of the request, so an identical request can succeed at a friend.
-// A plain 400 (malformed request) or a 429/5xx (real quota or provider trouble)
+// 401/403 (dead or unauthorised credential), a 503 whose body says
+// auth_unavailable (no usable local sign-in), and Anthropic's
+// claude_code_version_too_old gate qualify: all three are properties of the
+// local install, not of the request, so an identical request can succeed at a
+// friend. A plain 400, a 429, or any other 5xx (real quota or provider trouble)
 // must NOT fail over — retrying elsewhere would either repeat a client error or
 // spend a friend's quota on our own overload.
 //
@@ -269,15 +270,18 @@ func unusableLocalCredential(resp *http.Response) (string, bool) {
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return "credential rejected (HTTP " + strconv.Itoa(resp.StatusCode) + ")", true
-	case http.StatusBadRequest:
+	case http.StatusBadRequest, http.StatusServiceUnavailable:
 		peek, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if err != nil {
 			return "", false
 		}
-		// Restore the body so a non-matching 400 still streams to the client.
+		// Restore the body so a non-matching response still streams to the client.
 		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), resp.Body))
-		if bytes.Contains(peek, []byte("claude_code_version_too_old")) {
+		if resp.StatusCode == http.StatusBadRequest && bytes.Contains(peek, []byte("claude_code_version_too_old")) {
 			return "engine is too old for this model (claude_code_version_too_old)", true
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable && bytes.Contains(peek, []byte("auth_unavailable")) {
+			return "local credential unavailable (auth_unavailable)", true
 		}
 		return "", false
 	}

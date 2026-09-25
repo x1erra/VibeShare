@@ -85,17 +85,27 @@ type hostGrant struct {
 }
 
 type hostSession struct {
-	id string
-	pc *webrtc.PeerConnection
+	id       string
+	pc       *webrtc.PeerConnection
+	done     chan struct{}
+	doneOnce sync.Once
 
-	mu     sync.Mutex // guards dc + authed + inbound (written/read from pion callback goroutines)
-	dc     *webrtc.DataChannel
-	authed bool
+	mu         sync.Mutex // guards dc + authed + inbound + answerSent
+	dc         *webrtc.DataChannel
+	authed     bool
+	answerSent bool // candidates gathered before this are inside the answer SDP
 
 	// inbound accumulates chunked request bodies keyed by request id. Guarded
 	// by mu: pion runs one OnMessage goroutine per data channel, and a guest
 	// can open extra channels on the same session at any time.
 	inbound map[string]*inboundReq
+}
+
+func (hs *hostSession) markClosed() {
+	if hs == nil || hs.done == nil {
+		return
+	}
+	hs.doneOnce.Do(func() { close(hs.done) })
 }
 
 type inboundReq struct {
@@ -574,7 +584,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 		hg.mu.Unlock()
 		return
 	}
-	hs := &hostSession{id: session, pc: pc, inbound: map[string]*inboundReq{}}
+	hs := &hostSession{id: session, pc: pc, done: make(chan struct{}), inbound: map[string]*inboundReq{}}
 	hg.sessions[session] = hs
 	hg.mu.Unlock()
 	log.Printf("host[%s]: offer received", session)
@@ -583,6 +593,12 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 		if c == nil {
 			return
 		}
+		hs.mu.Lock()
+		sent := hs.answerSent
+		hs.mu.Unlock()
+		if !sent {
+			return // still inside the answer we are about to send
+		}
 		cand, _ := json.Marshal(c.ToJSON())
 		h.sendSignal(hg, session, "ice", cand)
 	})
@@ -590,12 +606,13 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("host[%s]: ICE state -> %s", session, state)
 	})
-	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		log.Printf("host[%s]: conn state -> %s", session, s)
-		if s == webrtc.PeerConnectionStateFailed ||
-			s == webrtc.PeerConnectionStateClosed ||
-			s == webrtc.PeerConnectionStateDisconnected {
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("host[%s]: conn state -> %s", session, state)
+		switch state {
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			h.closeSession(hg, session)
+		case webrtc.PeerConnectionStateDisconnected:
+			go surviveDisconnect(pc, hs.done, func() { h.closeSession(hg, session) })
 		}
 	})
 
@@ -608,6 +625,7 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 		dc.OnClose(func() { h.closeSession(hg, session) })
 	})
 
+	gatherDone := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		h.closeSession(hg, session)
 		return
@@ -621,7 +639,38 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 		h.closeSession(hg, session)
 		return
 	}
-	ansJSON, _ := json.Marshal(answer)
+	go h.finishAnswer(hg, hs, session, gatherDone)
+}
+
+// finishAnswer folds gathered candidates into one answer SDP. An older guest
+// applies that SDP as it always has. Candidates that arrive afterwards are
+// still sent as ice signals, which is the frame that guest already accepts.
+func (h *HostManager) finishAnswer(hg *hostGrant, hs *hostSession, session string, gatherDone <-chan struct{}) {
+	if gatherDone != nil {
+		timer := time.NewTimer(iceGatherTimeout)
+		select {
+		case <-gatherDone:
+		case <-hs.done:
+			timer.Stop()
+			return
+		case <-timer.C:
+			log.Printf("host[%s]: gathering still going after %s; sending candidates gathered so far", session, iceGatherTimeout)
+		}
+		timer.Stop()
+	}
+	select {
+	case <-hs.done:
+		return
+	default:
+	}
+	hs.mu.Lock()
+	hs.answerSent = true
+	hs.mu.Unlock()
+	local := hs.pc.LocalDescription()
+	if local == nil {
+		return
+	}
+	ansJSON, _ := json.Marshal(local)
 	h.sendSignal(hg, session, "answer", ansJSON)
 	log.Printf("host[%s]: answer sent", session)
 }
@@ -659,8 +708,11 @@ func (h *HostManager) closeSession(hg *hostGrant, session string) {
 		delete(hg.sessions, session)
 	}
 	hg.mu.Unlock()
-	if ok && hs.pc != nil {
-		_ = hs.pc.Close()
+	if ok {
+		hs.markClosed()
+		if hs.pc != nil {
+			_ = hs.pc.Close()
+		}
 	}
 }
 
@@ -673,6 +725,7 @@ func (h *HostManager) closeAllSessions(hg *hostGrant) {
 	}
 	hg.mu.Unlock()
 	for _, hs := range sessions {
+		hs.markClosed()
 		if hs.pc != nil {
 			_ = hs.pc.Close()
 		}

@@ -73,23 +73,11 @@ func (c *ControlServer) handler() http.Handler {
 	return loopbackGuard(mux)
 }
 
-type relayStatus struct {
-	URL       string `json:"url"`
-	Connected bool   `json:"connected"`
-}
-
 func (c *ControlServer) getStatus(w http.ResponseWriter, r *http.Request) {
 	cfg := c.store.Config()
-	connected := map[string]bool{}
-	for _, u := range c.nostr.ConnectedRelays() {
-		connected[u] = true
-	}
-	relays := make([]relayStatus, 0, len(cfg.NostrRelays))
-	for _, u := range cfg.NostrRelays {
-		relays = append(relays, relayStatus{URL: u, Connected: connected[u]})
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"running":             true,
+		"version":             appVersion,
 		"frontPort":           cfg.FrontPort,
 		"controlPort":         cfg.ControlPort,
 		"identityName":        cfg.IdentityName,
@@ -100,7 +88,7 @@ func (c *ControlServer) getStatus(w http.ResponseWriter, r *http.Request) {
 			"url":       cfg.UpstreamURL,
 			"reachable": c.upstream.Reachable(),
 		},
-		"nostr":         map[string]any{"relays": relays},
+		"nostr":         map[string]any{"relays": c.nostr.RelayViews(cfg.NostrRelays)},
 		"localModels":   c.upstream.ListModelIDs(),
 		"providerUsage": c.subUsage.MaybeRefresh(),
 	})

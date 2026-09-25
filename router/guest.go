@@ -54,14 +54,32 @@ type guestSession struct {
 	pc       *webrtc.PeerConnection
 	dc       *webrtc.DataChannel
 	keys     grantKeys
+	created  time.Time
 	authOK   chan struct{}
 	authErr  string
 	authOnce sync.Once
 	closed   chan struct{}
 	closeMu  sync.Once
 
-	mu      sync.Mutex
-	pending map[string]*pendingReq
+	mu         sync.Mutex
+	pending    map[string]*pendingReq
+	offerSent  bool            // candidates gathered before this are inside the offer SDP
+	gatherDone <-chan struct{} // armed before SetLocalDescription; nil in tests
+}
+
+// available is called with gc.mu held. Presence can expire while an already
+// authenticated data channel is still carrying requests, especially when a
+// relay stops forwarding heartbeats. Keep that working channel routable.
+func (gc *guestConn) available(now int64) bool {
+	liveChannel := false
+	if s := gc.session; s != nil && s.pc != nil && !s.isClosed() && s.isAuthed() {
+		liveChannel = s.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
+	}
+	return hostAvailable(gc.lastSeen, liveChannel, now)
+}
+
+func hostAvailable(lastSeen int64, liveChannel bool, now int64) bool {
+	return now-lastSeen < 60 || liveChannel
 }
 
 // pendingReq plumbs a single in-flight request's response frames from the pion
@@ -258,7 +276,7 @@ func (g *GuestManager) RemoteModels() []RemoteModel {
 	seen := map[string]bool{}
 	for _, gc := range conns {
 		gc.mu.Lock()
-		online := time.Now().Unix()-gc.lastSeen < 60
+		online := gc.available(time.Now().Unix())
 		revoked := gc.hostRevoked
 		name := gc.hostName
 		models := append([]string(nil), gc.hostModels...)
@@ -308,7 +326,7 @@ func (g *GuestManager) hostsForModel(model string) []*guestConn {
 	var cands []cand
 	for _, gc := range conns {
 		gc.mu.Lock()
-		online := time.Now().Unix()-gc.lastSeen < 60
+		online := gc.available(time.Now().Unix())
 		revoked := gc.hostRevoked
 		has := false
 		for _, m := range gc.hostModels {
@@ -428,7 +446,7 @@ func (g *GuestManager) OnlineFriends() (online, sharing int) {
 	defer g.mu.Unlock()
 	for _, gc := range g.conns {
 		gc.mu.Lock()
-		isOnline := time.Now().Unix()-gc.lastSeen < 60
+		isOnline := gc.available(time.Now().Unix())
 		revoked := gc.hostRevoked
 		hasModels := len(gc.hostModels) > 0
 		gc.mu.Unlock()
@@ -632,36 +650,68 @@ func (g *GuestManager) sendRequest(s *guestSession, id, method, path string, hea
 func (g *GuestManager) ensureSession(ctx context.Context, gc *guestConn) (*guestSession, error) {
 	gc.mu.Lock()
 	s := gc.session
+	// A negotiation that never authenticated must not be reused. Leaving it in
+	// place made every later request wait out the same dead offer.
+	if s != nil && !s.isClosed() && !s.isAuthed() && time.Since(s.created) >= connectTimeout {
+		s.close()
+		gc.session = nil
+		s = nil
+	}
 	if s != nil && !s.isClosed() {
 		gc.mu.Unlock()
 	} else {
 		var err error
-		s, err = g.newSession(gc)
+		s, err = g.prepareSession(gc)
 		if err != nil {
 			gc.mu.Unlock()
 			return nil, err
 		}
 		gc.session = s
 		gc.mu.Unlock()
+		g.publishOffer(gc, s)
 	}
 
+	wait := connectTimeout
+	if !s.isAuthed() {
+		if elapsed := time.Since(s.created); elapsed < connectTimeout {
+			wait = connectTimeout - elapsed
+		} else {
+			wait = 0
+		}
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case <-s.authOK:
 		if s.authErr != "" {
+			g.abandonSession(gc, s)
 			return nil, errors.New(s.authErr)
 		}
 		return s, nil
 	case <-s.closed:
 		return nil, errors.New("connection closed before auth")
-	case <-time.After(25 * time.Second):
+	case <-timer.C:
+		g.abandonSession(gc, s)
 		return nil, errors.New("timed out connecting to friend")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-// caller holds gc.mu
-func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
+// abandonSession drops a negotiation that failed before it could carry a
+// request, so the next attempt builds a new offer an older host will answer.
+func (g *GuestManager) abandonSession(gc *guestConn, s *guestSession) {
+	s.close()
+	gc.mu.Lock()
+	if gc.session == s {
+		gc.session = nil
+	}
+	gc.mu.Unlock()
+}
+
+// caller holds gc.mu. prepareSession does not wait on the network; publishOffer
+// sends the offer after ICE candidates have been folded into the SDP.
+func (g *GuestManager) prepareSession(gc *guestConn) (*guestSession, error) {
 	pc, err := webrtc.NewPeerConnection(webrtcConfig())
 	if err != nil {
 		return nil, err
@@ -676,6 +726,7 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 		pc:      pc,
 		dc:      dc,
 		keys:    gc.keys,
+		created: time.Now(),
 		authOK:  make(chan struct{}),
 		closed:  make(chan struct{}),
 		pending: map[string]*pendingReq{},
@@ -685,6 +736,12 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 		if c == nil {
 			return
 		}
+		s.mu.Lock()
+		sent := s.offerSent
+		s.mu.Unlock()
+		if !sent {
+			return // still inside the offer we are about to send
+		}
 		cand, _ := json.Marshal(c.ToJSON())
 		g.sendSignal(gc, s.id, "ice", cand)
 	})
@@ -693,10 +750,11 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("guest[%s]: conn state -> %s", s.id, state)
-		if state == webrtc.PeerConnectionStateFailed ||
-			state == webrtc.PeerConnectionStateClosed ||
-			state == webrtc.PeerConnectionStateDisconnected {
+		switch state {
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			s.close()
+		case webrtc.PeerConnectionStateDisconnected:
+			go surviveDisconnect(pc, s.closed, s.close)
 		}
 	})
 	dc.OnOpen(func() {
@@ -706,10 +764,12 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 			_ = sendFrame(dc, frame{T: "auth", Payload: payload})
 		}
 	})
+	dc.OnClose(func() { s.close() })
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		s.onFrame(msg.Data)
 	})
 
+	gatherDone := webrtc.GatheringCompletePromise(pc)
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		pc.Close()
@@ -719,10 +779,30 @@ func (g *GuestManager) newSession(gc *guestConn) (*guestSession, error) {
 		pc.Close()
 		return nil, err
 	}
-	offJSON, _ := json.Marshal(offer)
+	s.gatherDone = gatherDone
+	return s, nil
+}
+
+func (g *GuestManager) publishOffer(gc *guestConn, s *guestSession) {
+	if s.gatherDone != nil {
+		timer := time.NewTimer(iceGatherTimeout)
+		select {
+		case <-s.gatherDone:
+		case <-timer.C:
+			log.Printf("guest[%s]: gathering still going after %s; sending candidates gathered so far", s.id, iceGatherTimeout)
+		}
+		timer.Stop()
+	}
+	s.mu.Lock()
+	s.offerSent = true
+	s.mu.Unlock()
+	local := s.pc.LocalDescription()
+	if local == nil {
+		return
+	}
+	offJSON, _ := json.Marshal(local)
 	g.sendSignal(gc, s.id, "offer", offJSON)
 	log.Printf("guest[%s]: offer sent to room", s.id)
-	return s, nil
 }
 
 func (g *GuestManager) sendSignal(gc *guestConn, session, kind string, payload json.RawMessage) {
@@ -796,6 +876,15 @@ func (s *guestSession) isClosed() bool {
 	}
 }
 
+func (s *guestSession) isAuthed() bool {
+	select {
+	case <-s.authOK:
+		return s.authErr == ""
+	default:
+		return false
+	}
+}
+
 // ConnStatus is the guest-side runtime view of one connection.
 type ConnStatus struct {
 	Online           bool     `json:"online"`
@@ -830,7 +919,7 @@ func (g *GuestManager) Status(connID string) ConnStatus {
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
 	st.Revoked = gc.hostRevoked
-	st.Online = !gc.hostRevoked && time.Now().Unix()-gc.lastSeen < 60
+	st.Online = !gc.hostRevoked && gc.available(time.Now().Unix())
 	st.Routing = !gc.hostRevoked && gc.active > 0
 	st.Paused = gc.hostPaused
 	st.PausedReason = gc.hostReason

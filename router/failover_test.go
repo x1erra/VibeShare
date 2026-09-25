@@ -68,6 +68,8 @@ func TestUnusableLocalCredential(t *testing.T) {
 		{"client error", http.StatusBadRequest, `{"error":{"message":"messages: at least one message is required"}}`, false},
 		{"rate limited", http.StatusTooManyRequests, `{"error":"slow down"}`, false},
 		{"provider outage", http.StatusInternalServerError, `{"error":"boom"}`, false},
+		{"auth unavailable", http.StatusServiceUnavailable, `{"error":{"type":"auth_unavailable","message":"no auth available"}}`, true},
+		{"other 503", http.StatusServiceUnavailable, `{"error":{"type":"overloaded","message":"busy"}}`, false},
 		{"success", http.StatusOK, `{"content":"hi"}`, false},
 	}
 	for _, tc := range cases {

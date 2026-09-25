@@ -4,9 +4,31 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/pion/webrtc/v3"
+)
+
+// appVersion is the router build agents and the menu bar can report.
+// 1.1.0 keeps the 1.0 offer/answer/ice frames so a newer guest still talks to
+// a friend who has not installed this build yet.
+const appVersion = "1.1.0"
+
+const (
+	// connectTimeout is how long a guest waits for a friend's data channel to
+	// authenticate before abandoning that attempt and letting the next request
+	// start a fresh one.
+	connectTimeout = 25 * time.Second
+	// iceGatherTimeout bounds how long we wait to fold ICE candidates into the
+	// SDP before sending it. Whatever has been gathered still goes out, and any
+	// candidate that shows up later is trickled as a normal ice signal so an
+	// older peer keeps working.
+	iceGatherTimeout = 2 * time.Second
+	// disconnectGrace is how long a transient ICE "disconnected" may last
+	// before the session is torn down. "failed" and "closed" are terminal.
+	disconnectGrace = 15 * time.Second
 )
 
 // webrtcConfig returns the ICE configuration used for all peer connections.
@@ -76,6 +98,37 @@ func randomID(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// waitGathering blocks until ICE gathering finishes or the timeout elapses.
+// GatheringCompletePromise must be armed before SetLocalDescription.
+func waitGathering(pc *webrtc.PeerConnection, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-webrtc.GatheringCompletePromise(pc):
+	case <-timer.C:
+		log.Printf("ice: gathering still going after %s; sending candidates gathered so far", timeout)
+	}
+}
+
+// surviveDisconnect lets a transient "disconnected" recover. If the peer is
+// still down when the grace expires, closeFn runs. An older build that closes
+// immediately signals `closed` and this returns so we can open a new session
+// with the same offer/answer messages that build already understands.
+func surviveDisconnect(pc *webrtc.PeerConnection, closed <-chan struct{}, closeFn func()) {
+	timer := time.NewTimer(disconnectGrace)
+	defer timer.Stop()
+	select {
+	case <-closed:
+	case <-timer.C:
+		switch pc.ConnectionState() {
+		case webrtc.PeerConnectionStateDisconnected,
+			webrtc.PeerConnectionStateFailed,
+			webrtc.PeerConnectionStateClosed:
+			closeFn()
+		}
+	}
 }
 
 // authPayload is the plaintext sealed inside an `auth` frame's payload.

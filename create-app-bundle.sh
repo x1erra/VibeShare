@@ -18,6 +18,20 @@ GO_BIN="$(command -v go || echo /opt/homebrew/bin/go)"
 # Silicon and Intel Macs. Default builds for this machine's architecture only.
 UNIVERSAL="${UNIVERSAL:-0}"
 
+# The macOS 27 Command Line Tools SDK currently references SwiftUIMacros
+# without shipping its plugin. The installed 26.5 SDK builds the same app on
+# this host; callers may override this choice with SWIFT_SDK.
+SWIFT_SDK="${SWIFT_SDK:-}"
+if [ -z "$SWIFT_SDK" ] && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]; then
+  DEFAULT_SDK="$(xcrun --show-sdk-path 2>/dev/null || true)"
+  if [ -n "$DEFAULT_SDK" ]; then DEFAULT_SDK="$(realpath "$DEFAULT_SDK")"; fi
+  case "$DEFAULT_SDK" in
+    *MacOSX27*) SWIFT_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ;;
+  esac
+fi
+SWIFT_SDK_ARGS=()
+if [ -n "$SWIFT_SDK" ]; then SWIFT_SDK_ARGS=(--sdk "$SWIFT_SDK"); fi
+
 FETCH="$PROJECT_DIR/scripts/fetch-cliproxyapi.sh"
 # 1. Provider engine binary — pinned + checksum-verified by fetch-cliproxyapi.sh.
 #    Cached in Resources, so this only downloads on a fresh clone or version bump.
@@ -51,14 +65,28 @@ fi
 chmod +x "$RESOURCES_DIR/vibeshare-router"
 echo -e "${GREEN}✅ router archs: $(lipo -archs "$RESOURCES_DIR/vibeshare-router" 2>/dev/null)${NC}"
 
+echo -e "${BLUE}Building vibeshare CLI (Go)...${NC}"
+rm -f "$RESOURCES_DIR/vibeshare"
+if [ "$UNIVERSAL" = "1" ]; then
+  TMP_CLI="$(mktemp -d)"
+  ( cd "$ROUTER_DIR" \
+      && GOOS=darwin GOARCH=arm64 "$GO_BIN" build -trimpath -o "$TMP_CLI/c-arm64" ./cmd/vibeshare \
+      && GOOS=darwin GOARCH=amd64 "$GO_BIN" build -trimpath -o "$TMP_CLI/c-amd64" ./cmd/vibeshare )
+  lipo -create "$TMP_CLI/c-arm64" "$TMP_CLI/c-amd64" -output "$RESOURCES_DIR/vibeshare"
+  rm -rf "$TMP_CLI"
+else
+  ( cd "$ROUTER_DIR" && "$GO_BIN" build -trimpath -o "$RESOURCES_DIR/vibeshare" ./cmd/vibeshare )
+fi
+chmod +x "$RESOURCES_DIR/vibeshare"
+
 # 3. Build the Swift app (release).
 echo -e "${BLUE}Building Swift app (release)...${NC}"
 if [ "$UNIVERSAL" = "1" ]; then
-  ( cd "$SRC_DIR" && swift build -c release --arch arm64 --arch x86_64 -Xswiftc -DPACKAGED_APP )
-  BUILD_DIR="$SRC_DIR/.build/apple/Products/Release"
+  ( cd "$SRC_DIR" && swift build -c release --arch arm64 --arch x86_64 "${SWIFT_SDK_ARGS[@]}" -Xswiftc -DPACKAGED_APP )
+  BUILD_DIR="$(cd "$SRC_DIR" && swift build -c release --arch arm64 --arch x86_64 "${SWIFT_SDK_ARGS[@]}" --show-bin-path)"
 else
-  ( cd "$SRC_DIR" && swift build -c release ${TARGET_ARCH:+--arch "$TARGET_ARCH"} -Xswiftc -DPACKAGED_APP )
-  BUILD_DIR="$SRC_DIR/.build/release"
+  ( cd "$SRC_DIR" && swift build -c release ${TARGET_ARCH:+--arch "$TARGET_ARCH"} "${SWIFT_SDK_ARGS[@]}" -Xswiftc -DPACKAGED_APP )
+  BUILD_DIR="$(cd "$SRC_DIR" && swift build -c release ${TARGET_ARCH:+--arch "$TARGET_ARCH"} "${SWIFT_SDK_ARGS[@]}" --show-bin-path)"
 fi
 
 # 4. Assemble the .app.
@@ -79,7 +107,7 @@ cp "$SRC_DIR/Info.plist" "$APP_DIR/Contents/"
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
 
 # Inject version.
-VERSION="${APP_VERSION:-$(git -C "$PROJECT_DIR" describe --tags --abbrev=0 2>/dev/null || echo 1.0)}"
+VERSION="${APP_VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SRC_DIR/Info.plist")}"
 VERSION="${VERSION#v}"
 BUILD_NUMBER="$(git -C "$PROJECT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
@@ -98,7 +126,8 @@ xattr -cr "$APP_DIR" 2>/dev/null || true
 
 if [ -n "$IDENTITY" ]; then
   echo -e "${GREEN}Signing with: $IDENTITY${NC}"
-  for bin in cli-proxy-api-plus vibeshare-router; do
+  for bin in cli-proxy-api-plus vibeshare-router vibeshare; do
+    [ -f "$APP_DIR/Contents/Resources/$bin" ] || continue
     codesign --force --sign "$IDENTITY" --options runtime --timestamp \
       --entitlements "$ENT" "$APP_DIR/Contents/Resources/$bin"
   done
@@ -109,7 +138,8 @@ if [ -n "$IDENTITY" ]; then
   codesign --verify --deep --strict --verbose=2 "$APP_DIR" && echo -e "${GREEN}✅ verified${NC}"
 else
   echo -e "${YELLOW}No Developer ID — ad-hoc signing (fine for local use).${NC}"
-  for bin in cli-proxy-api-plus vibeshare-router; do
+  for bin in cli-proxy-api-plus vibeshare-router vibeshare; do
+    [ -f "$APP_DIR/Contents/Resources/$bin" ] || continue
     codesign --force --sign - --entitlements "$ENT" "$APP_DIR/Contents/Resources/$bin" 2>/dev/null || true
   done
   codesign --force --deep --sign - --entitlements "$ENT" "$APP_DIR"
