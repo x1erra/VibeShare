@@ -85,10 +85,11 @@ type hostGrant struct {
 }
 
 type hostSession struct {
-	id       string
-	pc       *webrtc.PeerConnection
-	done     chan struct{}
-	doneOnce sync.Once
+	id         string
+	pc         *webrtc.PeerConnection
+	done       chan struct{}
+	doneOnce   sync.Once
+	disconnect disconnectGuard
 
 	mu         sync.Mutex // guards dc + authed + inbound + answerSent
 	dc         *webrtc.DataChannel
@@ -613,11 +614,12 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("host[%s]: conn state -> %s", session, state)
+		generation := hs.disconnect.changed()
 		switch state {
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			h.closeSession(hg, session)
 		case webrtc.PeerConnectionStateDisconnected:
-			go surviveDisconnect(pc, hs.done, func() { h.closeSession(hg, session) })
+			go surviveDisconnect(pc, hs.done, &hs.disconnect, generation, func() { h.closeSession(hg, session) })
 		}
 	})
 

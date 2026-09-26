@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v3"
@@ -117,17 +118,27 @@ func waitGathering(pc *webrtc.PeerConnection, timeout time.Duration) {
 // still down when the grace expires, closeFn runs. An older build that closes
 // immediately signals `closed` and this returns so we can open a new session
 // with the same offer/answer messages that build already understands.
-func surviveDisconnect(pc *webrtc.PeerConnection, closed <-chan struct{}, closeFn func()) {
+type disconnectGuard struct{ generation atomic.Uint64 }
+
+func (g *disconnectGuard) changed() uint64 { return g.generation.Add(1) }
+
+func surviveDisconnect(pc *webrtc.PeerConnection, closed <-chan struct{}, guard *disconnectGuard, generation uint64, closeFn func()) {
 	timer := time.NewTimer(disconnectGrace)
 	defer timer.Stop()
+	closeIfStillDisconnected(pc.ConnectionState, closed, timer.C, guard, generation, closeFn)
+}
+
+// An earlier disconnected timer must not close a session during a later drop.
+// Every connection state transition invalidates all older timers.
+func closeIfStillDisconnected(state func() webrtc.PeerConnectionState, closed <-chan struct{}, expiry <-chan time.Time, guard *disconnectGuard, generation uint64, closeFn func()) {
 	select {
 	case <-closed:
-	case <-timer.C:
-		switch pc.ConnectionState() {
-		case webrtc.PeerConnectionStateDisconnected,
-			webrtc.PeerConnectionStateFailed,
-			webrtc.PeerConnectionStateClosed:
-			closeFn()
+	case <-expiry:
+		if guard.generation.Load() == generation {
+			switch state() {
+			case webrtc.PeerConnectionStateDisconnected:
+				closeFn()
+			}
 		}
 	}
 }

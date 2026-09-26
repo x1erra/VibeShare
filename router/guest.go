@@ -51,16 +51,17 @@ type guestConn struct {
 }
 
 type guestSession struct {
-	id       string
-	pc       *webrtc.PeerConnection
-	dc       *webrtc.DataChannel
-	keys     grantKeys
-	created  time.Time
-	authOK   chan struct{}
-	authErr  string
-	authOnce sync.Once
-	closed   chan struct{}
-	closeMu  sync.Once
+	id         string
+	pc         *webrtc.PeerConnection
+	dc         *webrtc.DataChannel
+	keys       grantKeys
+	created    time.Time
+	authOK     chan struct{}
+	authErr    string
+	authOnce   sync.Once
+	closed     chan struct{}
+	closeMu    sync.Once
+	disconnect disconnectGuard
 
 	mu         sync.Mutex
 	pending    map[string]*pendingReq
@@ -787,11 +788,12 @@ func (g *GuestManager) prepareSession(gc *guestConn) (*guestSession, error) {
 	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("guest[%s]: conn state -> %s", s.id, state)
+		generation := s.disconnect.changed()
 		switch state {
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			s.close()
 		case webrtc.PeerConnectionStateDisconnected:
-			go surviveDisconnect(pc, s.closed, s.close)
+			go surviveDisconnect(pc, s.closed, &s.disconnect, generation, s.close)
 		}
 	})
 	dc.OnOpen(func() {
