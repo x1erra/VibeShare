@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -27,7 +29,26 @@ var defaultNostrRelays = []string{
 	"wss://nos.lol",
 	"wss://nostr.mom",
 	"wss://relay.primal.net",
-	"wss://nostr-pub.wellorder.net",
+	"wss://relay.snort.social",
+}
+
+// Older default relay lists can strand an upgraded host on nos.lol when damus
+// rate-limits and the other old relays stop accepting signals. Only replace
+// exact shipped defaults; a user-selected relay list is left untouched.
+var legacyDefaultRelayLists = [][]string{
+	{"wss://relay.damus.io", "wss://nos.lol"},
+	{"wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"},
+	{"wss://relay.damus.io", "wss://nos.lol", "wss://nostr.mom", "wss://relay.primal.net", "wss://offchain.pub"},
+	{"wss://relay.damus.io", "wss://nos.lol", "wss://nostr.mom", "wss://relay.primal.net", "wss://nostr-pub.wellorder.net"},
+}
+
+func upgradeDefaultRelays(relays []string) []string {
+	for _, old := range legacyDefaultRelayLists {
+		if slices.Equal(relays, old) {
+			return append([]string(nil), defaultNostrRelays...)
+		}
+	}
+	return relays
 }
 
 // Config is the router's persisted configuration (~/.vibeshare/config.json).
@@ -128,10 +149,22 @@ func openStore(dir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{dir: dir, config: defaultConfig(), usage: map[string]Usage{}}
-	loadJSON(filepath.Join(dir, "config.json"), &s.config)
-	loadJSON(filepath.Join(dir, "grants.json"), &s.grants)
-	loadJSON(filepath.Join(dir, "connections.json"), &s.connections)
-	loadJSON(filepath.Join(dir, "usage.json"), &s.usage)
+	for _, item := range []struct {
+		name string
+		out  any
+	}{
+		{"config.json", &s.config},
+		{"grants.json", &s.grants},
+		{"connections.json", &s.connections},
+		{"usage.json", &s.usage},
+	} {
+		if err := loadJSON(filepath.Join(dir, item.name), item.out); err != nil {
+			return nil, err
+		}
+	}
+	if s.usage == nil {
+		s.usage = map[string]Usage{}
+	}
 	// Backfill any newly-added config fields that were absent on disk.
 	if s.config.FrontPort == 0 {
 		s.config.FrontPort = 8788
@@ -144,6 +177,18 @@ func openStore(dir string) (*Store, error) {
 	}
 	if len(s.config.NostrRelays) == 0 {
 		s.config.NostrRelays = append([]string(nil), defaultNostrRelays...)
+	} else {
+		old := s.config.NostrRelays
+		s.config.NostrRelays = upgradeDefaultRelays(old)
+		if !slices.Equal(old, s.config.NostrRelays) {
+			path := filepath.Join(dir, "config.json")
+			if err := backupConfigOnce(path); err != nil {
+				return nil, err
+			}
+			if err := saveUpgradedRelays(path, s.config.NostrRelays); err != nil {
+				return nil, fmt.Errorf("save upgraded relay config: %w", err)
+			}
+		}
 	}
 	if s.config.UsageReservePercent == 0 {
 		s.config.UsageReservePercent = 20 // sane default for the slider before it's touched
@@ -151,14 +196,57 @@ func openStore(dir string) (*Store, error) {
 	return s, nil
 }
 
-func loadJSON(path string, out any) {
+func backupConfigOnce(path string) error {
+	backup := path + ".pre-1.1.1"
+	if _, err := os.Stat(backup); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return err
+	}
+	tmp := backup + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, backup); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Preserve fields from a newer app version while changing only the relay list.
+func saveUpgradedRelays(path string, relays []string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	value, err := json.Marshal(relays)
+	if err != nil {
+		return err
+	}
+	fields["nostrRelays"] = value
+	return saveJSON(path, fields)
+}
+
+func loadJSON(path string, out any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		log.Printf("store: ignoring invalid %s: %v", path, err)
+		return fmt.Errorf("invalid %s: %w", path, err)
 	}
+	return nil
 }
 
 func saveJSON(path string, v any) error {

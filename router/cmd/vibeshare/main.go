@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-const cliVersion = "1.1.0"
+const cliVersion = "1.1.1"
 
 func main() {
 	args := os.Args[1:]

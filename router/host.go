@@ -94,7 +94,8 @@ type hostSession struct {
 	mu         sync.Mutex // guards dc + authed + inbound + answerSent
 	dc         *webrtc.DataChannel
 	authed     bool
-	answerSent bool // candidates gathered before this are inside the answer SDP
+	answerSent bool            // candidates gathered before this are inside the answer SDP
+	answer     json.RawMessage // resend if the relay dropped the first answer
 
 	// inbound accumulates chunked request bodies keyed by request id. Guarded
 	// by mu: pion runs one OnMessage goroutine per data channel, and a guest
@@ -581,9 +582,12 @@ func (h *HostManager) handleOffer(hg *hostGrant, sc signalContent) {
 	}
 
 	hg.mu.Lock()
-	if _, exists := hg.sessions[session]; exists {
+	if existing := hg.sessions[session]; existing != nil {
 		hg.mu.Unlock()
-		return // duplicate offer (seen via another relay)
+		if answer := existing.cachedAnswer(); len(answer) > 0 {
+			h.sendSignal(hg, session, "answer", answer)
+		}
+		return // duplicate offer; keep the existing peer connection
 	}
 	pc, err := webrtc.NewPeerConnection(webrtcConfig())
 	if err != nil {
@@ -678,8 +682,17 @@ func (h *HostManager) finishAnswer(hg *hostGrant, hs *hostSession, session strin
 		return
 	}
 	ansJSON, _ := json.Marshal(local)
+	hs.mu.Lock()
+	hs.answer = append(json.RawMessage(nil), ansJSON...)
+	hs.mu.Unlock()
 	h.sendSignal(hg, session, "answer", ansJSON)
 	log.Printf("host[%s]: answer sent", session)
+}
+
+func (hs *hostSession) cachedAnswer() json.RawMessage {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return append(json.RawMessage(nil), hs.answer...)
 }
 
 func (h *HostManager) handleICE(hg *hostGrant, sc signalContent) {

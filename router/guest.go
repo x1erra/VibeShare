@@ -59,6 +59,8 @@ type guestSession struct {
 	authOK     chan struct{}
 	authErr    string
 	authOnce   sync.Once
+	answerSeen chan struct{}
+	answerOnce sync.Once
 	closed     chan struct{}
 	closeMu    sync.Once
 	disconnect disconnectGuard
@@ -248,7 +250,11 @@ func (g *GuestManager) onEvent(gc *guestConn, ev *nostr.Event) {
 			log.Printf("guest[%s]: answer received", s.id)
 			var answer webrtc.SessionDescription
 			if json.Unmarshal(sc.Payload, &answer) == nil {
-				_ = s.pc.SetRemoteDescription(answer)
+				if s.pc.SetRemoteDescription(answer) == nil {
+					if s.answerSeen != nil {
+						s.answerOnce.Do(func() { close(s.answerSeen) })
+					}
+				}
 			}
 		case "ice":
 			var cand webrtc.ICECandidateInit
@@ -707,6 +713,7 @@ func (g *GuestManager) ensureSession(ctx context.Context, gc *guestConn) (*guest
 		gc.session = s
 		gc.mu.Unlock()
 		g.publishOffer(gc, s)
+		go g.retryOffer(gc, s)
 	}
 
 	wait := connectTimeout
@@ -760,14 +767,15 @@ func (g *GuestManager) prepareSession(gc *guestConn) (*guestSession, error) {
 		return nil, err
 	}
 	s := &guestSession{
-		id:      randomID(8),
-		pc:      pc,
-		dc:      dc,
-		keys:    gc.keys,
-		created: time.Now(),
-		authOK:  make(chan struct{}),
-		closed:  make(chan struct{}),
-		pending: map[string]*pendingReq{},
+		id:         randomID(8),
+		pc:         pc,
+		dc:         dc,
+		keys:       gc.keys,
+		created:    time.Now(),
+		authOK:     make(chan struct{}),
+		answerSeen: make(chan struct{}),
+		closed:     make(chan struct{}),
+		pending:    map[string]*pendingReq{},
 	}
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -842,6 +850,44 @@ func (g *GuestManager) publishOffer(gc *guestConn, s *guestSession) {
 	offJSON, _ := json.Marshal(local)
 	g.sendSignal(gc, s.id, "offer", offJSON)
 	log.Printf("guest[%s]: offer sent to room", s.id)
+}
+
+// A relay may drop an ephemeral offer without acknowledging it. Retry twice
+// while there is no answer; the host recognizes the session ID and can resend
+// its answer without creating another peer connection.
+func (g *GuestManager) retryOffer(gc *guestConn, s *guestSession) {
+	ticker := time.NewTicker(8 * time.Second)
+	defer ticker.Stop()
+	retryOfferOnTicks(g.ctx.Done(), s.answerSeen, s.authOK, s.closed, ticker.C, 2, func() {
+		g.publishOffer(gc, s)
+	})
+}
+
+func retryOfferOnTicks(ctxDone, answered, authed, closed <-chan struct{}, ticks <-chan time.Time, retries int, resend func()) {
+	for i := 0; i < retries; i++ {
+		select {
+		case <-ctxDone:
+			return
+		case <-answered:
+			return
+		case <-authed:
+			return
+		case <-closed:
+			return
+		case <-ticks:
+			// A response may have arrived at the same instant as the tick.
+			select {
+			case <-answered:
+				return
+			case <-authed:
+				return
+			case <-closed:
+				return
+			default:
+			}
+			resend()
+		}
+	}
 }
 
 func (g *GuestManager) sendSignal(gc *guestConn, session, kind string, payload json.RawMessage) {

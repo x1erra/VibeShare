@@ -34,17 +34,22 @@ func main() {
 	}
 
 	cfg := store.Config()
+	configOverridden := false
 	if *frontPort != 0 {
 		cfg.FrontPort = *frontPort
+		configOverridden = true
 	}
 	if *controlPort != 0 {
 		cfg.ControlPort = *controlPort
+		configOverridden = true
 	}
 	if *upstreamURL != "" {
 		cfg.UpstreamURL = *upstreamURL
+		configOverridden = true
 	}
 	if *name != "" {
 		cfg.IdentityName = *name
+		configOverridden = true
 	}
 	if *relays != "" {
 		var list []string
@@ -55,10 +60,13 @@ func main() {
 		}
 		if len(list) > 0 {
 			cfg.NostrRelays = list
+			configOverridden = true
 		}
 	}
-	if err := store.SetConfig(cfg); err != nil {
-		log.Printf("store: save config: %v", err)
+	if configOverridden {
+		if err := store.SetConfig(cfg); err != nil {
+			log.Printf("store: save config: %v", err)
+		}
 	}
 	cfg = store.Config()
 

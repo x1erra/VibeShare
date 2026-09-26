@@ -24,12 +24,12 @@ type NostrClient struct {
 	pk   string
 
 	mu      sync.Mutex
-	relays  map[string]*nostr.Relay        // url -> connected relay
-	dialing map[string]bool                // url -> a connect attempt is already running
-	health  map[string]relayHealth         // url -> publish backoff
-	rooms   map[string]func(*nostr.Event)  // roomID -> handler
-	subs    map[string]*nostr.Subscription // "url|room" -> active subscription, nil while connecting
-	seen    map[string]bool                // event id dedupe
+	relays  map[string]*nostr.Relay       // url -> connected relay
+	dialing map[string]bool               // url -> a connect attempt is already running
+	health  map[string]relayHealth        // url -> publish backoff
+	rooms   map[string]func(*nostr.Event) // roomID -> handler
+	subs    map[string]*relaySubscription // "url|room" -> pending or active subscription
+	seen    map[string]bool               // event id dedupe
 	ctx     context.Context
 }
 
@@ -43,6 +43,11 @@ type relayHealth struct {
 	deadlines      int
 }
 
+type relaySubscription struct {
+	relay *nostr.Relay
+	sub   *nostr.Subscription // nil while Subscribe is in flight
+}
+
 func newNostrClient(urls []string) *NostrClient {
 	sk := nostr.GeneratePrivateKey()
 	pk, _ := nostr.GetPublicKey(sk)
@@ -54,7 +59,7 @@ func newNostrClient(urls []string) *NostrClient {
 		dialing: map[string]bool{},
 		health:  map[string]relayHealth{},
 		rooms:   map[string]func(*nostr.Event){},
-		subs:    map[string]*nostr.Subscription{},
+		subs:    map[string]*relaySubscription{},
 		seen:    map[string]bool{},
 	}
 }
@@ -87,7 +92,7 @@ func (n *NostrClient) AddRoom(roomID string, handler func(*nostr.Event)) {
 	n.mu.Unlock()
 
 	for url, r := range relays {
-		n.ensureSub(url, r, roomID, handler)
+		go n.ensureSub(url, r, roomID)
 	}
 }
 
@@ -96,11 +101,11 @@ func (n *NostrClient) RemoveRoom(roomID string) {
 	var toClose []*nostr.Subscription
 	n.mu.Lock()
 	delete(n.rooms, roomID)
-	for k, sub := range n.subs {
+	for k, slot := range n.subs {
 		if strings.HasSuffix(k, "|"+roomID) {
 			delete(n.subs, k)
-			if sub != nil {
-				toClose = append(toClose, sub)
+			if slot.sub != nil {
+				toClose = append(toClose, slot.sub)
 			}
 		}
 	}
@@ -148,6 +153,9 @@ func (n *NostrClient) publishTargets(signal bool) []*nostr.Relay {
 	byURL := make(map[string]*nostr.Relay, len(n.relays))
 	items := make([]relayCandidate, 0, len(n.relays))
 	for url, r := range n.relays {
+		if !r.IsConnected() {
+			continue
+		}
 		byURL[url] = r
 		h := n.health[url]
 		items = append(items, relayCandidate{URL: url, FailUntil: h.failUntil, Soft: h.soft, Throttled: h.throttledUntil})
@@ -200,7 +208,8 @@ func (n *NostrClient) RelayViews(configured []string) []RelayView {
 	now := time.Now()
 	out := make([]RelayView, 0, len(configured))
 	for _, u := range configured {
-		_, conn := n.relays[u]
+		r, conn := n.relays[u]
+		conn = conn && r.IsConnected()
 		h := n.health[u]
 		v := RelayView{URL: u, Connected: conn}
 		if h.failUntil.After(now) {
@@ -216,12 +225,14 @@ func (n *NostrClient) maintain() {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	n.reconnectAll()
+	n.repairSubscriptions()
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
 		case <-t.C:
 			n.reconnectAll()
+			n.repairSubscriptions()
 		}
 	}
 }
@@ -230,11 +241,15 @@ func (n *NostrClient) reconnectAll() {
 	// One stuck handshake must not keep the other relays from connecting.
 	for _, url := range n.urls {
 		n.mu.Lock()
-		_, connected := n.relays[url]
+		relay := n.relays[url]
 		busy := n.dialing[url]
 		cooling := n.health[url].failUntil.After(time.Now())
 		n.mu.Unlock()
-		if connected || busy || cooling {
+		if relay != nil && !relay.IsConnected() {
+			n.dropRelay(url, relay)
+			relay = nil
+		}
+		if relay != nil || busy || cooling {
 			continue
 		}
 		go n.connectOne(url)
@@ -277,26 +292,71 @@ func (n *NostrClient) connectOne(url string) {
 		return
 	}
 	n.relays[url] = relay
-	rooms := make(map[string]func(*nostr.Event), len(n.rooms))
-	for id, h := range n.rooms {
-		rooms[id] = h
+	rooms := make([]string, 0, len(n.rooms))
+	for id := range n.rooms {
+		rooms = append(rooms, id)
 	}
 	n.mu.Unlock()
 
 	log.Printf("nostr: connected %s", url)
-	for roomID, handler := range rooms {
-		n.ensureSub(url, relay, roomID, handler)
+	for _, roomID := range rooms {
+		go n.ensureSub(url, relay, roomID)
 	}
 }
 
-func (n *NostrClient) ensureSub(url string, relay *nostr.Relay, roomID string, handler func(*nostr.Event)) {
+// Remove every room subscription tied to a dead socket before reconnecting.
+// A late callback from an old socket must not remove its replacement.
+func (n *NostrClient) dropRelay(url string, relay *nostr.Relay) {
+	var toClose []*nostr.Subscription
+	n.mu.Lock()
+	if n.relays[url] != relay {
+		n.mu.Unlock()
+		return
+	}
+	delete(n.relays, url)
+	for key, slot := range n.subs {
+		if slot.relay == relay {
+			delete(n.subs, key)
+			if slot.sub != nil {
+				toClose = append(toClose, slot.sub)
+			}
+		}
+	}
+	n.mu.Unlock()
+	for _, sub := range toClose {
+		sub.Unsub()
+	}
+	_ = relay.Close()
+}
+
+func (n *NostrClient) repairSubscriptions() {
+	n.mu.Lock()
+	for url, relay := range n.relays {
+		if !relay.IsConnected() {
+			continue
+		}
+		for roomID := range n.rooms {
+			if _, ok := n.subs[subKey(url, roomID)]; !ok {
+				go n.ensureSub(url, relay, roomID)
+			}
+		}
+	}
+	n.mu.Unlock()
+}
+
+func (n *NostrClient) ensureSub(url string, relay *nostr.Relay, roomID string) {
 	key := subKey(url, roomID)
 	n.mu.Lock()
+	if n.relays[url] != relay || n.rooms[roomID] == nil {
+		n.mu.Unlock()
+		return
+	}
 	if _, ok := n.subs[key]; ok {
 		n.mu.Unlock()
 		return
 	}
-	n.subs[key] = nil
+	slot := &relaySubscription{relay: relay}
+	n.subs[key] = slot
 	n.mu.Unlock()
 
 	since := nostr.Timestamp(time.Now().Add(-30 * time.Second).Unix())
@@ -309,34 +369,41 @@ func (n *NostrClient) ensureSub(url string, relay *nostr.Relay, roomID string, h
 	sub, err := relay.Subscribe(n.ctx, filters)
 	if err != nil {
 		n.mu.Lock()
-		delete(n.subs, key)
+		if n.subs[key] == slot {
+			delete(n.subs, key)
+		}
 		n.mu.Unlock()
+		log.Printf("nostr: subscribe %s failed: %v", url, err)
 		return
 	}
 
 	n.mu.Lock()
-	if _, ok := n.subs[key]; !ok {
+	if n.subs[key] != slot || n.relays[url] != relay || n.rooms[roomID] == nil {
 		n.mu.Unlock()
 		sub.Unsub()
 		return
 	}
-	n.subs[key] = sub
+	slot.sub = sub
 	n.mu.Unlock()
 
 	go func() {
 		defer func() {
 			n.mu.Lock()
-			if n.subs[key] == sub {
-				// Relay/subscription died unexpectedly — drop it so maintain()
-				// reconnects and re-subscribes active rooms.
+			if n.subs[key] == slot {
 				delete(n.subs, key)
-				delete(n.relays, url)
 			}
 			n.mu.Unlock()
+			if !relay.IsConnected() {
+				n.dropRelay(url, relay)
+			}
 		}()
 		for {
 			select {
 			case <-n.ctx.Done():
+				return
+			case reason := <-sub.ClosedReason:
+				log.Printf("nostr: subscription %s closed: %s", url, reason)
+				sub.Unsub()
 				return
 			case ev, ok := <-sub.Events:
 				if !ok {
