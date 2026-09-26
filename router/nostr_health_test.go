@@ -15,6 +15,14 @@ func TestApplyPublishFailure(t *testing.T) {
 	if wait != 15*time.Minute {
 		t.Fatalf("403 wait=%s", wait)
 	}
+	h, wait = applyPublishFailure(relayHealth{}, "msg: blocked: spam not permitted", now)
+	if wait != 15*time.Minute || h.soft {
+		t.Fatalf("spam refusal wait=%s soft=%t", wait, h.soft)
+	}
+	refused := relayCandidate{URL: "wss://refused", FailUntil: h.failUntil, Soft: h.soft}
+	if got := pickRelayURLs(now, []relayCandidate{refused}, true, nil); len(got) != 0 {
+		t.Fatalf("signal to refusing relay = %v, want skipped", got)
+	}
 	h, wait = applyPublishFailure(relayHealth{}, "msg: rate-limited: you are noting too much", now)
 	if wait != 2*time.Minute {
 		t.Fatalf("rate-limit wait=%s", wait)

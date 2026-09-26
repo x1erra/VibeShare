@@ -24,7 +24,8 @@ type relayCandidate struct {
 // toward a cooldown so one slow relay does not silence the room.
 func applyPublishFailure(h relayHealth, reason string, now time.Time) (relayHealth, time.Duration) {
 	switch {
-	case strings.Contains(reason, "banned"), strings.Contains(reason, "403"):
+	case strings.Contains(reason, "banned"), strings.Contains(reason, "403"),
+		strings.Contains(reason, "spam not permitted"):
 		h.deadlines = 0
 		h.soft = false
 		h.failUntil = now.Add(15 * time.Minute)

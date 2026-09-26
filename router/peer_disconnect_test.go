@@ -38,7 +38,7 @@ func TestOldDisconnectTimerCannotCloseRecoveredSession(t *testing.T) {
 	}
 }
 
-func TestDisconnectTimerIgnoresRecoveredOrClosedSession(t *testing.T) {
+func TestDisconnectTimerIgnoresRecoveredSession(t *testing.T) {
 	var guard disconnectGuard
 	generation := guard.changed()
 	expiry := make(chan time.Time, 1)
